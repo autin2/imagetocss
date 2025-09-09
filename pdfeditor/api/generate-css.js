@@ -1,4 +1,4 @@
-// Vercel serverless function — 2-pass CSS generation (draft + refine)
+// Vercel serverless function — N-pass CSS generation (draft + multiple refine passes)
 import OpenAI from "openai";
 
 const MODEL = "gpt-4o-mini"; // fast, vision-capable
@@ -10,13 +10,13 @@ export default async function handler(req, res) {
       return res.status(405).json({ error: "Method not allowed" });
     }
 
-    // Read raw body (Node on Vercel doesn't auto-parse)
+    // Read raw body (Vercel Node runtime doesn't auto-parse)
     let body = "";
     for await (const chunk of req) body += chunk;
-    const { image, palette = [], passes = 2 } = JSON.parse(body || "{}");
+    const { image, palette = [], passes = 5 } = JSON.parse(body || "{}");
 
     if (!image || typeof image !== "string" || !image.startsWith("data:image")) {
-      return res.status(400).json({ error: "Send { image: dataUrl, palette?: string[], passes?: 1|2 }" });
+      return res.status(400).json({ error: "Send { image: dataUrl, palette?: string[], passes?: number }" });
     }
     if (!process.env.OPENAI_API_KEY) {
       return res.status(500).json({ error: "OPENAI_API_KEY not configured" });
@@ -25,23 +25,33 @@ export default async function handler(req, res) {
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
     // ---------- PASS 1: draft ----------
-    const draft = await firstPass(client, { image, palette });
+    const first = await firstPass(client, { image, palette });
+    const versions = [first];
 
-    let css = draft;
-    // ---------- PASS 2: refine (optional) ----------
-    if (passes > 1) {
-      css = await refinePass(client, { image, palette, draft });
+    // ---------- PASSES 2..N: refine ----------
+    const totalPasses = Math.max(1, Math.min(Number(passes) || 1, 8)); // safety cap
+    let current = first;
+
+    for (let i = 2; i <= totalPasses; i++) {
+      current = await refinePass(client, { image, palette, css: current, passNum: i, totalPasses });
+      versions.push(current);
     }
 
     res.setHeader("Cache-Control", "no-store");
-    return res.status(200).json({ draft, css, palette });
+    return res.status(200).json({
+      draft: versions[0],
+      css: versions[versions.length - 1],
+      versions,           // all passes in order
+      palette,
+      passes: totalPasses
+    });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ error: "Failed to generate CSS." });
   }
 }
 
-// ----- HELPERS -----
+/* ---------------- helpers ---------------- */
 
 function sanitizeCss(text = "") {
   return String(text)
@@ -89,7 +99,7 @@ async function firstPass(client, { image, palette }) {
   return sanitizeCss(resp?.choices?.[0]?.message?.content || "");
 }
 
-async function refinePass(client, { image, palette, draft }) {
+async function refinePass(client, { image, palette, css, passNum, totalPasses }) {
   const system = [
     "You are a CSS corrector and auditor.",
     "Return VANILLA CSS ONLY (no Markdown fences, no HTML).",
@@ -99,18 +109,18 @@ async function refinePass(client, { image, palette, draft }) {
   ].join(" ");
 
   const user = [
-    "Task: Compare the reference image and the CURRENT CSS attempt.",
-    "Fix deviations so the output is closer to a 1:1 match:",
+    `Refinement pass ${passNum} of ${totalPasses}. Compare the reference image and the CURRENT CSS.`,
+    "Fix deviations so the output matches the image as closely as possible:",
     "- Use ONLY the given palette (or close perceptual matches).",
-    "- Ensure :root tokens include --ink, --paper, brand colors; use #ffffff background if dominant.",
-    "- Headline: very large, extra-bold, uppercase if present; tighten letter-spacing.",
-    "- Buttons: rounded (ideally pill), hover darkens the same color (e.g. filter: brightness(0.92)).",
-    "- Borders: light neutral (e.g. #e5e7eb) unless the image shows otherwise.",
+    "- If background is predominantly white, set --paper: #ffffff.",
+    "- Headline: very large, extra-bold, uppercase if shown; tighten letter-spacing.",
+    "- Buttons: pill radius; hover darkens same color (e.g., filter: brightness(0.92)).",
+    "- Borders: light neutral (#e5e7eb) unless the image shows otherwise.",
     "- Remove Sass/LESS functions like darken(); only valid CSS.",
-    "Return the corrected full CSS only.",
+    "- Keep the overall structure (:root, utilities, components).",
     "",
-    "CURRENT CSS ATTEMPT:",
-    "```css\n" + draft + "\n```",
+    "CURRENT CSS:",
+    "```css\n" + css + "\n```",
     "",
     palette?.length ? "STRICT PALETTE: " + palette.join(", ") : "No explicit palette provided."
   ].join("\n");
@@ -131,5 +141,5 @@ async function refinePass(client, { image, palette, draft }) {
     ]
   });
 
-  return sanitizeCss(resp?.choices?.[0]?.message?.content || draft);
+  return sanitizeCss(resp?.choices?.[0]?.message?.content || css);
 }
