@@ -72,6 +72,9 @@ h1{font-size:38px;line-height:1.15;margin:6px 0 10px}
   background:#fff;border:1px solid var(--border);display:grid;place-items:center;font-size:12px;color:var(--muted);
   box-shadow:0 1px 6px rgba(0,0,0,.05);
 }
+/* Drag highlight */
+.snip-frame.drop{cursor:pointer;transition:background .2s ease,border-color .2s ease}
+.snip-frame.drop.drag{border-color:var(--accent);background:#f0fbff}
 
 /* Demo component */
 .demo-card{
@@ -97,27 +100,17 @@ h1{font-size:38px;line-height:1.15;margin:6px 0 10px}
   --d-border: var(--color-3, #e5e7eb);   /* border highlight */
 }
 
-/* Code block (landing) — fixed height so no layout shift */
+/* Code block */
 .code{
   background:#0a0c10;color:#e5e7eb;font:13px/1.45 ui-monospace, Menlo, Consolas, monospace;
   border-radius:10px;border:1px solid #1f2937;padding:12px;
   overflow:auto;height:220px;white-space:pre;contain:content;
 }
+/* Taller code area on app page */
+.code#output{height:280px}
 
-/* Footer */
-.footer{height:var(--footerH);display:flex;align-items:center;border-top:1px solid var(--border);
-  padding:0 0;color:var(--muted);background:#fff}
-
-/* --- App page additions --- */
-
-/* Snip-frame doubles as the drop zone */
-.snip-frame.drop{cursor:pointer;transition:background .2s ease,border-color .2s ease}
-.snip-frame.drop.drag{border-color:var(--accent);background:#f0fbff}
-
-/* Inner content of the drop zone */
-.drop-inner{
-  min-height:340px;display:grid;place-items:center;text-align:center;color:var(--muted);padding:12px
-}
+/* Drop zone inner */
+.drop-inner{min-height:340px;display:grid;place-items:center;text-align:center;color:var(--muted);padding:12px}
 .drop-inner>div{max-width:90%}
 .drop-inner .hint{margin-top:6px;font-size:13px;color:var(--muted)}
 .drop-inner .btn-row{display:flex;gap:10px;justify-content:center;margin-top:10px}
@@ -129,11 +122,9 @@ h1{font-size:38px;line-height:1.15;margin:6px 0 10px}
 .outputbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}
 .outputbar .label{color:var(--muted);font-size:13px}
 
-/* Taller code area on app page */
-.code#output{height:280px}
-
-/* Hidden file input (accessible via label/JS) */
-.hidden-input{display:none}
+/* Footer */
+.footer{height:var(--footerH);display:flex;align-items:center;border-top:1px solid var(--border);
+  padding:0 0;color:var(--muted);background:#fff}
 
 /* Responsive */
 @media (max-width:980px){
