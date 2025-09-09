@@ -3,28 +3,21 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Image to CSS — App</title>
-  <meta name="description" content="Drop an image to generate CSS variables, utilities, and matching HTML. Private by default; runs in your browser."/>
+  <title>Image → index.html</title>
   <link rel="stylesheet" href="style.css"/>
-  <meta name="theme-color" content="#0f172a"/>
 </head>
 <body class="is-app">
-  <!-- Header -->
   <header class="header">
     <div class="container nav">
-      <a href="/" class="brand">
-        <span class="brand-mark" aria-hidden="true"></span>
-        <b>Image&nbsp;to&nbsp;CSS</b>
-      </a>
-      <nav class="links" aria-label="Primary">
+      <a href="/" class="brand"><b>Image&nbsp;to&nbsp;CSS</b></a>
+      <nav class="links">
         <a href="index.html">Home</a>
         <a href="pricing.html">Pricing</a>
-        <a href="signin.html" class="btn small ghost">Sign in</a>
       </nav>
     </div>
   </header>
 
-  <main class="container" style="padding:32px 20px 24px">
+  <main class="container" style="padding:28px 16px">
     <!-- Drop zone -->
     <section class="card pad" aria-labelledby="imgLabel">
       <h2 id="imgLabel" style="margin:0 0 10px">Image</h2>
@@ -32,108 +25,56 @@
         <div id="dropInner" class="drop-inner">
           <div>
             <strong>Drag & drop an image</strong> or click to select
-            <div class="hint">JPG, PNG, or WebP · processed locally in your browser</div>
-            <div class="btn-row">
-              <button id="selectBtn" class="btn small" type="button">Select image</button>
-            </div>
+            <div class="hint">JPG, PNG, or WebP · processed locally</div>
+            <div class="btn-row"><button id="selectBtn" class="btn small" type="button">Select image</button></div>
           </div>
         </div>
         <input id="fileInput" class="hidden-input" type="file" accept="image/*" aria-label="Choose image"/>
       </div>
     </section>
 
-    <!-- Outputs -->
-    <section class="card pad" style="margin-top:14px" aria-labelledby="outLabel1">
+    <!-- Index HTML output -->
+    <section class="card pad" style="margin-top:14px" aria-labelledby="idxLabel">
       <div class="outputbar">
-        <span id="outLabel1" class="label">Draft (pass 1)</span>
+        <span id="idxLabel" class="label">index.html (copy / download)</span>
         <div>
-          <button id="copyDraft" class="btn small" type="button">Copy draft</button>
+          <button id="copyIndex" class="btn small" type="button">Copy</button>
+          <button id="downloadIndex" class="btn small" type="button">Download</button>
         </div>
       </div>
-      <pre id="outputDraft" class="code" aria-live="polite">/* Drop an image to generate your CSS here */</pre>
+      <pre id="indexOut" class="code" aria-live="polite"><!-- Generated index.html will appear here --></pre>
     </section>
 
-    <section class="card pad" style="margin-top:14px" aria-labelledby="outLabel2">
-      <div class="outputbar">
-        <span id="outLabel2" class="label">Refined (pass 5)</span>
-        <div>
-          <button id="copyFinal" class="btn small" type="button">Copy refined</button>
-          <button id="clearBtn" class="btn small" type="button">Clear</button>
-        </div>
-      </div>
-      <pre id="outputFinal" class="code" aria-live="polite">/* The refined CSS will appear here */</pre>
-    </section>
-
-    <!-- HTML markup (from API) -->
-    <section class="card pad" style="margin-top:14px" aria-labelledby="htmlLabel">
-      <div class="outputbar">
-        <span id="htmlLabel" class="label">HTML markup (copy)</span>
-        <div>
-          <button id="copyHtml" class="btn small" type="button">Copy HTML</button>
-        </div>
-      </div>
-      <pre id="outputHtml" class="code" aria-live="polite"><!-- Your HTML snippet will appear here --></pre>
-    </section>
-
-    <!-- Optional: view all passes -->
-    <section class="card pad" style="margin-top:14px" aria-labelledby="allLabel">
-      <details id="allPasses">
-        <summary id="allLabel" class="label" style="cursor:pointer">Show all passes</summary>
-        <div id="versionsWrap" style="margin-top:10px; display:grid; gap:10px"></div>
-      </details>
+    <!-- Live preview -->
+    <section class="card pad" style="margin-top:14px" aria-labelledby="prevLabel">
+      <div class="outputbar"><span id="prevLabel" class="label">Live preview</span></div>
+      <iframe id="preview" title="index.html preview" style="width:100%;height:520px;border:1px solid var(--border-light,#e5e7eb);border-radius:8px"></iframe>
     </section>
   </main>
 
-  <footer class="footer">
-    <div class="container" style="display:flex;justify-content:space-between;align-items:center;height:100%">
-      <span>© <span id="y">2025</span> Image to CSS</span>
-      <span style="color:var(--muted)">Private by default</span>
-    </div>
-  </footer>
-
   <script>
-    // Year
-    document.getElementById('y').textContent = new Date().getFullYear();
-
     // Elements
     const drop = document.getElementById('drop');
     const dropInner = document.getElementById('dropInner');
     const fileInput = document.getElementById('fileInput');
     const selectBtn = document.getElementById('selectBtn');
-    const outputDraft = document.getElementById('outputDraft');
-    const outputFinal = document.getElementById('outputFinal');
-    const outputHtml = document.getElementById('outputHtml');
-    const copyDraft = document.getElementById('copyDraft');
-    const copyFinal = document.getElementById('copyFinal');
-    const copyHtml  = document.getElementById('copyHtml');
-    const clearBtn = document.getElementById('clearBtn');
-    const versionsWrap = document.getElementById('versionsWrap');
-    const outLabel2 = document.getElementById('outLabel2');
+    const indexOut = document.getElementById('indexOut');
+    const copyIndex = document.getElementById('copyIndex');
+    const downloadIndex = document.getElementById('downloadIndex');
+    const preview = document.getElementById('preview');
 
-    // Click/select behavior
+    // Click/select
     selectBtn.addEventListener('click', () => fileInput.click());
     drop.addEventListener('click', () => fileInput.click());
-    drop.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.click(); }
-    });
+    drop.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.click(); } });
 
-    // Drag & drop behavior
-    ['dragenter','dragover'].forEach(ev => {
-      drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('drag'); });
-    });
-    ['dragleave','drop'].forEach(ev => {
-      drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('drag'); });
-    });
-    drop.addEventListener('drop', (e) => {
-      const f = e.dataTransfer.files && e.dataTransfer.files[0];
-      if (f) handleFile(f);
-    });
-    fileInput.addEventListener('change', (e) => {
-      const f = e.target.files && e.target.files[0];
-      if (f) handleFile(f);
-    });
+    // Drag & drop
+    ['dragenter','dragover'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('drag'); }));
+    ['dragleave','drop'].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('drag'); }));
+    drop.addEventListener('drop', e => { const f = e.dataTransfer.files?.[0]; if (f) handleFile(f); });
+    fileInput.addEventListener('change', e => { const f = e.target.files?.[0]; if (f) handleFile(f); });
 
-    // Canvas → data URL (downscale for perf)
+    // Canvas downscale → data URI
     function toDataUri(img, maxSide = 1600){
       const ratio = Math.min(maxSide / img.width, maxSide / img.height, 1);
       const w = Math.max(1, Math.round(img.width * ratio));
@@ -142,156 +83,46 @@
       c.width = w; c.height = h;
       const cx = c.getContext('2d', { willReadFrequently: true });
       cx.drawImage(img, 0, 0, w, h);
-      const dataUri = c.toDataURL('image/png', 0.9);
-      return { dataUri, w, h, canvas: c, ctx: cx };
+      return c.toDataURL('image/png', 0.92);
     }
 
-    // Palette extractor (fast quantization)
-    function extractPaletteFromCanvas(canvas, ctx, count = 6) {
-      const { width:w, height:h } = canvas;
-      const step = Math.max(1, Math.floor(Math.max(w, h) / 100)); // ~10k px
-      const map = new Map();
-
-      for (let y = 0; y < h; y += step) {
-        const row = ctx.getImageData(0, y, w, 1).data;
-        for (let x = 0; x < w * 4; x += 4 * step) {
-          const r = row[x], g = row[x+1], b = row[x+2], a = row[x+3];
-          if (a < 200) continue;
-          const rq = (r >> 3) << 3, gq = (g >> 3) << 3, bq = (b >> 3) << 3;
-          const key = (rq<<16) | (gq<<8) | bq;
-          map.set(key, (map.get(key) || 0) + 1);
-        }
-      }
-
-      const top = [...map.entries()].sort((a,b) => b[1]-a[1]).slice(0, count*3).map(([k])=>{
-        const r = (k >> 16) & 255, g = (k >> 8) & 255, b = k & 255;
-        return "#" + [r,g,b].map(v => v.toString(16).padStart(2,'0')).join('');
-      });
-
-      const chosen = [];
-      const dist = (h1,h2) => {
-        const a = parseInt(h1.slice(1),16), b = parseInt(h2.slice(1),16);
-        const ar=(a>>16)&255, ag=(a>>8)&255, ab=a&255;
-        const br=(b>>16)&255, bg=(b>>8)&255, bb=b&255;
-        const dr=ar-br, dg=ag-bg, db=ab-bb;
-        return Math.sqrt(dr*dr+dg*dg+db*db);
-      };
-      top.forEach(hex=>{
-        if (!chosen.some(c => dist(c,hex) < 24)) chosen.push(hex);
-      });
-
-      return chosen.slice(0, Math.max(4, Math.min(count, 6)));
+    // Quick palette sampler (optional hint; neutral)
+    function extractPalette(dataUri){
+      return []; // keep neutral; you can plug your sampler here if you still want to send a palette hint
     }
 
-    // Fallback HTML builder (only used if API doesn't return html)
-    function buildHtmlSnippet(cssText = '') {
-      const has = (re) => re.test(cssText);
-      const pickClass = (names) => {
-        for (const n of names) {
-          const re = new RegExp('\\.' + n.replace(/\s+/g,'\\s+') + '\\b');
-          if (has(re)) return n;
-        }
-        return null;
-      };
-
-      const primaryBtn = pickClass(['btn-1','btn-primary','btn']) || 'btn';
-      const outlineBtn = pickClass(['btn--outline','btn-outline','btn-2']) || null;
-      const heroClass  = has(/\.hero\b/) ? 'hero' : '';
-      const bg1        = has(/\.bg-1\b/) ? 'bg-1' : '';
-      const text1      = has(/\.text-1\b/) ? 'text-1' : '';
-      const text3      = has(/\.text-3\b/) ? 'text-3' : '';
-
-      const outlineAttrs = outlineBtn
-        ? `class="${outlineBtn}"`
-        : `class="${primaryBtn}" style="background:var(--paper);border:1px solid var(--border, var(--border-light,#e5e7eb))"`;
-
-      return `<!-- Hero -->
-<section class="${[heroClass, bg1].filter(Boolean).join(' ')}">
-  <div style="max-width:1100px;margin:0 auto;text-align:center;padding:50px 20px">
-    <h1 class="${text1}">CONNECT YOUR MONEY WORLDWIDE</h1>
-    <p class="${text3}" style="${text3?'':'color:var(--brand-gray)'}">Pay and get paid globally. Fast, simple and secure.</p>
-    <div style="display:flex;gap:12px;justify-content:center;margin-top:16px">
-      <a href="#" class="${primaryBtn}">Send money now</a>
-      <a href="#" ${outlineAttrs}>How our transfers work</a>
-    </div>
-  </div>
-</section>`;
-    }
-
-    // Handle file: preview + call API (5 passes, expects JSON {css, html})
     async function handleFile(file){
-      if (!file.type.startsWith('image/')) {
-        alert('Please choose an image file.');
-        return;
-      }
+      if (!file.type.startsWith('image/')) { alert('Please choose an image file.'); return; }
 
       const img = new Image();
       const url = URL.createObjectURL(file);
       img.onload = async () => {
-        // Preview
+        // preview thumbnail inside drop
         dropInner.innerHTML = '';
-        const wrap = document.createElement('div');
-        const details = document.createElement('div');
-        details.className = 'hint';
-        details.textContent = `${file.name} — ${img.width}×${img.height}`;
-        const preview = document.createElement('img');
-        preview.className = 'preview-img';
-        preview.src = url;
-        wrap.appendChild(preview);
-        wrap.appendChild(details);
-        dropInner.appendChild(wrap);
+        const thumb = document.createElement('img');
+        thumb.src = url; thumb.className = 'preview-img';
+        dropInner.appendChild(thumb);
 
-        const { dataUri, canvas, ctx } = toDataUri(img, 1600);
-        const palette = extractPaletteFromCanvas(canvas, ctx, 6);
+        const dataUri = toDataUri(img, 1600);
+        const palette = extractPalette(dataUri); // currently []
 
-        outputDraft.textContent = `/* Analyzing (pass 1)...\nPalette: ${palette.join(", ")} */`;
-        outputFinal.textContent = '/* Refining (passes 2–5)... */';
-        outputHtml.textContent = '<!-- Your HTML snippet will appear here -->';
-        versionsWrap.innerHTML = '';
+        indexOut.textContent = '<!-- Generating full index.html... -->';
+        preview.srcdoc = '<!doctype html><html><body style="font:14px system-ui, sans-serif;padding:16px;color:#666">Generating…</body></html>';
 
         try {
-          const r = await fetch('/api/generate-css', {
+          const r = await fetch('/api/generate-index', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ image: dataUri, palette, passes: 5 })
           });
-          const data = await r.json();
-          if (!r.ok) throw new Error(data.error || 'Error');
-
-          // Show draft + final CSS
-          outputDraft.textContent = (data.draft || '').trim() || '/* No draft returned */';
-          outputFinal.textContent = (data.css || '').trim() || '/* No refined output returned */';
-
-          // Update label with actual count
-          const passCount = data.passes || (data.versions?.length ?? 2);
-          outLabel2.textContent = `Refined (pass ${passCount})`;
-
-          // Render all passes (optional)
-          if (Array.isArray(data.versions)) {
-            data.versions.forEach((cssText, idx) => {
-              const heading = document.createElement('div');
-              heading.className = 'label';
-              heading.style.margin = '8px 0 4px';
-              heading.textContent = `Pass ${idx + 1}`;
-              const box = document.createElement('pre');
-              box.className = 'code';
-              box.textContent = cssText;
-              versionsWrap.appendChild(heading);
-              versionsWrap.appendChild(box);
-            });
-          }
-
-          // Apply :root tokens from refined CSS
-          tryApplyTokensToDemo(outputFinal.textContent);
-
-          // HTML snippet: prefer server; fallback to local builder
-          const serverHtml = (data.html && String(data.html).trim()) || '';
-          outputHtml.textContent = serverHtml || buildHtmlSnippet(outputFinal.textContent);
+          const html = await r.text();
+          if (!r.ok) throw new Error('API error');
+          indexOut.textContent = html;
+          preview.srcdoc = html;
         } catch (e) {
           console.error(e);
-          outputDraft.textContent = '/* Failed to generate. */';
-          outputFinal.textContent = '/* Failed to refine. */';
-          outputHtml.textContent  = '<!-- Failed to build HTML snippet -->';
+          indexOut.textContent = '<!-- Failed to generate index.html -->';
+          preview.srcdoc = '<!doctype html><html><body style="font:14px system-ui, sans-serif;padding:16px;color:#c00">Failed.</body></html>';
         } finally {
           setTimeout(() => URL.revokeObjectURL(url), 1500);
         }
@@ -300,43 +131,20 @@
       img.src = url;
     }
 
-    // Apply :root tokens to document
-    function tryApplyTokensToDemo(cssText){
-      const m = cssText.match(/:root\s*\{([\s\S]*?)\}/);
-      if (!m) return;
-      const styleTag = document.getElementById('generated-root') || Object.assign(document.createElement('style'), { id: 'generated-root' });
-      styleTag.textContent = `:root{${m[1]}}`;
-      document.head.appendChild(styleTag);
-    }
-
-    // Copy buttons
-    copyDraft.addEventListener('click', async () => {
-      try { await navigator.clipboard.writeText(outputDraft.textContent); copyDraft.textContent='Copied!'; setTimeout(()=>copyDraft.textContent='Copy draft', 900); }
-      catch { alert('Unable to copy.'); }
-    });
-    copyFinal.addEventListener('click', async () => {
-      try { await navigator.clipboard.writeText(outputFinal.textContent); copyFinal.textContent='Copied!'; setTimeout(()=>copyFinal.textContent='Copy refined', 900); }
-      catch { alert('Unable to copy.'); }
-    });
-    copyHtml.addEventListener('click', async () => {
-      try { await navigator.clipboard.writeText(outputHtml.textContent); copyHtml.textContent='Copied!'; setTimeout(()=>copyHtml.textContent='Copy HTML', 900); }
+    // Copy & Download
+    copyIndex.addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(indexOut.textContent); copyIndex.textContent='Copied!'; setTimeout(()=>copyIndex.textContent='Copy', 900); }
       catch { alert('Unable to copy.'); }
     });
 
-    // Clear
-    clearBtn.addEventListener('click', () => {
-      outputDraft.textContent = '/* Drop an image to generate your CSS here */';
-      outputFinal.textContent = '/* The refined CSS will appear here */';
-      outputHtml.textContent  = '<!-- Your HTML snippet will appear here -->';
-      versionsWrap.innerHTML = '';
-      dropInner.innerHTML = `
-        <div>
-          <strong>Drag & drop an image</strong> or click to select
-          <div class="hint">JPG, PNG, or WebP · processed locally in your browser</div>
-          <div class="btn-row"><button id="selectBtn2" class="btn small" type="button">Select image</button></div>
-        </div>`;
-      document.getElementById('selectBtn2')?.addEventListener('click', () => fileInput.click());
-      fileInput.value = '';
+    downloadIndex.addEventListener('click', () => {
+      const blob = new Blob([indexOut.textContent], { type: 'text/html;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'index.html';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
     });
   </script>
 </body>
