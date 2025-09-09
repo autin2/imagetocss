@@ -55,13 +55,21 @@
 
     <section class="card pad" style="margin-top:14px" aria-labelledby="outLabel2">
       <div class="outputbar">
-        <span id="outLabel2" class="label">Refined (pass 2)</span>
+        <span id="outLabel2" class="label">Refined (pass 5)</span>
         <div>
           <button id="copyFinal" class="btn small" type="button">Copy refined</button>
           <button id="clearBtn" class="btn small" type="button">Clear</button>
         </div>
       </div>
       <pre id="outputFinal" class="code" aria-live="polite">/* The refined CSS will appear here */</pre>
+    </section>
+
+    <!-- Optional: view all passes -->
+    <section class="card pad" style="margin-top:14px" aria-labelledby="allLabel">
+      <details id="allPasses">
+        <summary id="allLabel" class="label" style="cursor:pointer">Show all passes</summary>
+        <div id="versionsWrap" style="margin-top:10px; display:grid; gap:10px"></div>
+      </details>
     </section>
   </main>
 
@@ -86,6 +94,8 @@
     const copyDraft = document.getElementById('copyDraft');
     const copyFinal = document.getElementById('copyFinal');
     const clearBtn = document.getElementById('clearBtn');
+    const versionsWrap = document.getElementById('versionsWrap');
+    const outLabel2 = document.getElementById('outLabel2');
 
     // Click/select behavior
     selectBtn.addEventListener('click', () => fileInput.click());
@@ -110,7 +120,7 @@
       if (f) handleFile(f);
     });
 
-    // Canvas → data URL (downscale)
+    // Canvas → data URL (downscale for perf)
     function toDataUri(img, maxSide = 1600){
       const ratio = Math.min(maxSide / img.width, maxSide / img.height, 1);
       const w = Math.max(1, Math.round(img.width * ratio));
@@ -160,7 +170,7 @@
       return chosen.slice(0, Math.max(4, Math.min(count, 6)));
     }
 
-    // Handle file: preview + call API (2-pass)
+    // Handle file: preview + call API (5 passes)
     async function handleFile(file){
       if (!file.type.startsWith('image/')) {
         alert('Please choose an image file.');
@@ -186,20 +196,40 @@
         const { dataUri, canvas, ctx } = toDataUri(img, 1600);
         const palette = extractPaletteFromCanvas(canvas, ctx, 6);
 
-        outputDraft.textContent = `/* Analyzing (pass 1)...\\nPalette: ${palette.join(", ")} */`;
-        outputFinal.textContent = '/* Refining (pass 2)... */';
+        outputDraft.textContent = `/* Analyzing (pass 1)...\nPalette: ${palette.join(", ")} */`;
+        outputFinal.textContent = '/* Refining (passes 2–5)... */';
+        versionsWrap.innerHTML = '';
 
         try {
           const r = await fetch('/api/generate-css', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ image: dataUri, palette, passes: 2 })
+            body: JSON.stringify({ image: dataUri, palette, passes: 5 })
           });
           const data = await r.json();
           if (!r.ok) throw new Error(data.error || 'Error');
 
           outputDraft.textContent = (data.draft || '').trim() || '/* No draft returned */';
           outputFinal.textContent = (data.css || '').trim() || '/* No refined output returned */';
+
+          // update label with actual count
+          const passCount = data.passes || (data.versions?.length ?? 2);
+          outLabel2.textContent = `Refined (pass ${passCount})`;
+
+          // render all passes (optional details)
+          if (Array.isArray(data.versions)) {
+            data.versions.forEach((cssText, idx) => {
+              const box = document.createElement('pre');
+              box.className = 'code';
+              box.textContent = cssText;
+              const heading = document.createElement('div');
+              heading.className = 'label';
+              heading.style.margin = '8px 0 4px';
+              heading.textContent = `Pass ${idx + 1}`;
+              versionsWrap.appendChild(heading);
+              versionsWrap.appendChild(box);
+            });
+          }
 
           // Apply :root from refined if present
           tryApplyTokensToDemo(outputFinal.textContent);
@@ -236,6 +266,7 @@
     clearBtn.addEventListener('click', () => {
       outputDraft.textContent = '/* Drop an image to generate your CSS here */';
       outputFinal.textContent = '/* The refined CSS will appear here */';
+      versionsWrap.innerHTML = '';
       dropInner.innerHTML = `
         <div>
           <strong>Drag & drop an image</strong> or click to select
