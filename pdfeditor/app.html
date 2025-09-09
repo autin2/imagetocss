@@ -25,7 +25,7 @@
   </header>
 
   <main class="container" style="padding:32px 20px 24px">
-    <!-- Drop zone with snipping effect -->
+    <!-- Drop zone -->
     <section class="card pad" aria-labelledby="imgLabel">
       <h2 id="imgLabel" style="margin:0 0 10px">Image</h2>
       <div id="drop" class="snip-frame drop" role="button" tabindex="0" aria-label="Drag & drop or select an image">
@@ -42,16 +42,26 @@
       </div>
     </section>
 
-    <!-- Output box -->
-    <section class="card pad" style="margin-top:14px" aria-labelledby="outLabel">
+    <!-- Outputs -->
+    <section class="card pad" style="margin-top:14px" aria-labelledby="outLabel1">
       <div class="outputbar">
-        <span id="outLabel" class="label">Output</span>
+        <span id="outLabel1" class="label">Draft (pass 1)</span>
         <div>
-          <button id="copyBtn" class="btn small" type="button">Copy</button>
+          <button id="copyDraft" class="btn small" type="button">Copy draft</button>
+        </div>
+      </div>
+      <pre id="outputDraft" class="code" aria-live="polite">/* Drop an image to generate your CSS here */</pre>
+    </section>
+
+    <section class="card pad" style="margin-top:14px" aria-labelledby="outLabel2">
+      <div class="outputbar">
+        <span id="outLabel2" class="label">Refined (pass 2)</span>
+        <div>
+          <button id="copyFinal" class="btn small" type="button">Copy refined</button>
           <button id="clearBtn" class="btn small" type="button">Clear</button>
         </div>
       </div>
-      <pre id="output" class="code" aria-live="polite">/* Drop an image to generate your CSS here */</pre>
+      <pre id="outputFinal" class="code" aria-live="polite">/* The refined CSS will appear here */</pre>
     </section>
   </main>
 
@@ -71,8 +81,10 @@
     const dropInner = document.getElementById('dropInner');
     const fileInput = document.getElementById('fileInput');
     const selectBtn = document.getElementById('selectBtn');
-    const output = document.getElementById('output');
-    const copyBtn = document.getElementById('copyBtn');
+    const outputDraft = document.getElementById('outputDraft');
+    const outputFinal = document.getElementById('outputFinal');
+    const copyDraft = document.getElementById('copyDraft');
+    const copyFinal = document.getElementById('copyFinal');
     const clearBtn = document.getElementById('clearBtn');
 
     // Click/select behavior
@@ -98,7 +110,7 @@
       if (f) handleFile(f);
     });
 
-    // Canvas → data URL (downscale for faster upload)
+    // Canvas → data URL (downscale)
     function toDataUri(img, maxSide = 1600){
       const ratio = Math.min(maxSide / img.width, maxSide / img.height, 1);
       const w = Math.max(1, Math.round(img.width * ratio));
@@ -111,18 +123,17 @@
       return { dataUri, w, h, canvas: c, ctx: cx };
     }
 
-    // FAST palette extractor: quantize & count, then pick distinct top colors
+    // Palette extractor (fast quantization)
     function extractPaletteFromCanvas(canvas, ctx, count = 6) {
       const { width:w, height:h } = canvas;
-      const step = Math.max(1, Math.floor(Math.max(w, h) / 100)); // sample ~10k px max
+      const step = Math.max(1, Math.floor(Math.max(w, h) / 100)); // ~10k px
       const map = new Map();
 
       for (let y = 0; y < h; y += step) {
         const row = ctx.getImageData(0, y, w, 1).data;
         for (let x = 0; x < w * 4; x += 4 * step) {
           const r = row[x], g = row[x+1], b = row[x+2], a = row[x+3];
-          if (a < 200) continue; // skip transparent
-          // 5-bit quantization to stabilize buckets
+          if (a < 200) continue;
           const rq = (r >> 3) << 3, gq = (g >> 3) << 3, bq = (b >> 3) << 3;
           const key = (rq<<16) | (gq<<8) | bq;
           map.set(key, (map.get(key) || 0) + 1);
@@ -134,7 +145,6 @@
         return "#" + [r,g,b].map(v => v.toString(16).padStart(2,'0')).join('');
       });
 
-      // Deduplicate near colors (simple Euclidean threshold)
       const chosen = [];
       const dist = (h1,h2) => {
         const a = parseInt(h1.slice(1),16), b = parseInt(h2.slice(1),16);
@@ -147,11 +157,10 @@
         if (!chosen.some(c => dist(c,hex) < 24)) chosen.push(hex);
       });
 
-      // Keep 4–6 colors
       return chosen.slice(0, Math.max(4, Math.min(count, 6)));
     }
 
-    // Handle file: preview + call API with palette
+    // Handle file: preview + call API (2-pass)
     async function handleFile(file){
       if (!file.type.startsWith('image/')) {
         alert('Please choose an image file.');
@@ -161,7 +170,7 @@
       const img = new Image();
       const url = URL.createObjectURL(file);
       img.onload = async () => {
-        // Render preview
+        // Preview
         dropInner.innerHTML = '';
         const wrap = document.createElement('div');
         const details = document.createElement('div');
@@ -174,28 +183,30 @@
         wrap.appendChild(details);
         dropInner.appendChild(wrap);
 
-        // Build data URL + palette
         const { dataUri, canvas, ctx } = toDataUri(img, 1600);
         const palette = extractPaletteFromCanvas(canvas, ctx, 6);
 
-        output.textContent = `/* Analyzing image with AI…\nPalette: ${palette.join(", ")} */`;
+        outputDraft.textContent = `/* Analyzing (pass 1)...\\nPalette: ${palette.join(", ")} */`;
+        outputFinal.textContent = '/* Refining (pass 2)... */';
 
         try {
           const r = await fetch('/api/generate-css', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ image: dataUri, palette })
+            body: JSON.stringify({ image: dataUri, palette, passes: 2 })
           });
           const data = await r.json();
           if (!r.ok) throw new Error(data.error || 'Error');
-          const css = (data.css || '').trim();
-          output.textContent = css || '/* No CSS returned. Try another image. */';
 
-          // Apply :root tokens to the page if present
-          tryApplyTokensToDemo(css);
+          outputDraft.textContent = (data.draft || '').trim() || '/* No draft returned */';
+          outputFinal.textContent = (data.css || '').trim() || '/* No refined output returned */';
+
+          // Apply :root from refined if present
+          tryApplyTokensToDemo(outputFinal.textContent);
         } catch (e) {
           console.error(e);
-          output.textContent = '/* Failed to generate CSS. Try another image. */';
+          outputDraft.textContent = '/* Failed to generate. */';
+          outputFinal.textContent = '/* Failed to refine. */';
         } finally {
           setTimeout(() => URL.revokeObjectURL(url), 1500);
         }
@@ -204,7 +215,7 @@
       img.src = url;
     }
 
-    // Inject :root { ... } so any tokens affect the page/demo
+    // Apply :root tokens to document
     function tryApplyTokensToDemo(cssText){
       const m = cssText.match(/:root\s*\{([\s\S]*?)\}/);
       if (!m) return;
@@ -214,23 +225,24 @@
     }
 
     // Copy / Clear
-    copyBtn.addEventListener('click', async () => {
-      try {
-        await navigator.clipboard.writeText(output.textContent);
-        copyBtn.textContent = 'Copied!';
-        setTimeout(() => copyBtn.textContent = 'Copy', 900);
-      } catch { alert('Unable to copy.'); }
+    copyDraft.addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(outputDraft.textContent); copyDraft.textContent='Copied!'; setTimeout(()=>copyDraft.textContent='Copy draft', 900); }
+      catch { alert('Unable to copy.'); }
+    });
+    copyFinal.addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(outputFinal.textContent); copyFinal.textContent='Copied!'; setTimeout(()=>copyFinal.textContent='Copy refined', 900); }
+      catch { alert('Unable to copy.'); }
     });
     clearBtn.addEventListener('click', () => {
-      output.textContent = '/* Drop an image to generate your CSS here */';
+      outputDraft.textContent = '/* Drop an image to generate your CSS here */';
+      outputFinal.textContent = '/* The refined CSS will appear here */';
       dropInner.innerHTML = `
         <div>
           <strong>Drag & drop an image</strong> or click to select
           <div class="hint">JPG, PNG, or WebP · processed locally in your browser</div>
           <div class="btn-row"><button id="selectBtn2" class="btn small" type="button">Select image</button></div>
         </div>`;
-      const selectBtn2 = document.getElementById('selectBtn2');
-      if (selectBtn2) selectBtn2.addEventListener('click', () => fileInput.click());
+      document.getElementById('selectBtn2')?.addEventListener('click', () => fileInput.click());
       fileInput.value = '';
     });
   </script>
