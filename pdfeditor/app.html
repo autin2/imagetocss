@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Image to CSS — App</title>
+  <meta name="description" content="Drop an image to generate CSS variables & utilities. Private by default; runs in your browser."/>
+  <link rel="stylesheet" href="style.css"/>
+  <meta name="theme-color" content="#0f172a"/>
+</head>
+<body class="is-app">
+  <!-- Header (same shell) -->
+  <header class="header">
+    <div class="container nav">
+      <a href="/" class="brand">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <b>Image&nbsp;to&nbsp;CSS</b>
+      </a>
+      <nav class="links" aria-label="Primary">
+        <a href="index.html">Home</a>
+        <a href="pricing.html">Pricing</a>
+        <a href="signin.html" class="btn small ghost">Sign in</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="container" style="padding:32px 20px 24px">
+    <!-- Drop zone with snipping effect -->
+    <section class="card pad" aria-labelledby="imgLabel">
+      <h2 id="imgLabel" style="margin:0 0 10px">Image</h2>
+      <div id="drop" class="snip-frame drop" role="button" tabindex="0" aria-label="Drag & drop or select an image">
+        <div id="dropInner" class="drop-inner">
+          <div>
+            <strong>Drag & drop an image</strong> or click to select
+            <div class="hint">JPG, PNG, or WebP · processed locally in your browser</div>
+            <div class="btn-row">
+              <button id="selectBtn" class="btn small" type="button">Select image</button>
+            </div>
+          </div>
+        </div>
+        <input id="fileInput" class="hidden-input" type="file" accept="image/*" aria-label="Choose image"/>
+      </div>
+    </section>
+
+    <!-- Output box -->
+    <section class="card pad" style="margin-top:14px" aria-labelledby="outLabel">
+      <div class="outputbar">
+        <span id="outLabel" class="label">Output</span>
+        <div>
+          <button id="copyBtn" class="btn small" type="button">Copy</button>
+          <button id="clearBtn" class="btn small" type="button">Clear</button>
+        </div>
+      </div>
+      <pre id="output" class="code" aria-live="polite">/* Drop an image to generate your CSS here */</pre>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="container" style="display:flex;justify-content:space-between;align-items:center;height:100%">
+      <span>© <span id="y">2025</span> Image to CSS</span>
+      <span style="color:var(--muted)">Private by default</span>
+    </div>
+  </footer>
+
+  <script>
+    // Keep year fresh
+    document.getElementById('y').textContent = new Date().getFullYear();
+
+    // Elements
+    const drop = document.getElementById('drop');
+    const dropInner = document.getElementById('dropInner');
+    const fileInput = document.getElementById('fileInput');
+    const selectBtn = document.getElementById('selectBtn');
+    const output = document.getElementById('output');
+    const copyBtn = document.getElementById('copyBtn');
+    const clearBtn = document.getElementById('clearBtn');
+
+    // Click/select behavior
+    selectBtn.addEventListener('click', () => fileInput.click());
+    drop.addEventListener('click', (e) => {
+      // avoid click when an image is already shown (still open file chooser)
+      fileInput.click();
+    });
+    drop.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.click(); }
+    });
+
+    // Drag & drop behavior
+    ['dragenter','dragover'].forEach(ev => {
+      drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('drag'); });
+    });
+    ['dragleave','drop'].forEach(ev => {
+      drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('drag'); });
+    });
+    drop.addEventListener('drop', (e) => {
+      const f = e.dataTransfer.files && e.dataTransfer.files[0];
+      if (f) handleFile(f);
+    });
+    fileInput.addEventListener('change', (e) => {
+      const f = e.target.files && e.target.files[0];
+      if (f) handleFile(f);
+    });
+
+    // Core: show preview and print a placeholder CSS snippet (no AI yet)
+    function handleFile(file){
+      if (!file.type.startsWith('image/')) {
+        alert('Please choose an image file.');
+        return;
+      }
+      const img = new Image();
+      const url = URL.createObjectURL(file);
+      img.onload = () => {
+        // Render preview
+        dropInner.innerHTML = '';
+        const wrap = document.createElement('div');
+        const details = document.createElement('div');
+        details.className = 'hint';
+        details.textContent = `${file.name} — ${img.width}×${img.height}`;
+        const preview = document.createElement('img');
+        preview.className = 'preview-img';
+        preview.src = url;
+        wrap.appendChild(preview);
+        wrap.appendChild(details);
+        dropInner.appendChild(wrap);
+
+        // Make a smaller dataURI for background usage (cap longest side to 1200px)
+        const { dataUri, scaledW, scaledH } = toDataUri(img, 1200);
+
+        // Placeholder CSS (hook up your AI logic later)
+        output.textContent = buildCssPlaceholder({file, imgW: img.width, imgH: img.height, dataUri, scaledW, scaledH});
+
+        // Revoke object URL later
+        setTimeout(() => URL.revokeObjectURL(url), 1500);
+      };
+      img.onerror = () => alert('Could not load that image.');
+      img.src = url;
+    }
+
+    function toDataUri(img, maxSide = 1200){
+      const ratio = Math.min(maxSide / img.width, maxSide / img.height, 1);
+      const w = Math.max(1, Math.round(img.width * ratio));
+      const h = Math.max(1, Math.round(img.height * ratio));
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      const cx = c.getContext('2d', { willReadFrequently: true });
+      cx.drawImage(img, 0, 0, w, h);
+      const dataUri = c.toDataURL('image/png', 0.9);
+      return { dataUri, scaledW: w, scaledH: h };
+    }
+
+    function buildCssPlaceholder({file, imgW, imgH, dataUri, scaledW, scaledH}){
+      return `/* Placeholder output — plug in your AI to replace this with real tokens */
+:root{
+  --color-1:#0ea5e9; /* example */
+  --color-2:#111827;
+  --color-3:#f59e0b;
+  --color-4:#22c55e;
+  --ink:#0f172a;
+  --paper:#ffffff;
+}
+
+/* Utilities (examples) */
+.bg-1{ background:var(--color-1); }
+.text-2{ color:var(--color-2); }
+.border-3{ border-color:var(--color-3); }
+.btn-4{
+  background:var(--color-4);
+  color:#05212c;
+  border:1px solid var(--color-4);
+  padding:10px 14px;
+  border-radius:10px;
+}
+
+/* Optional: use your image as a CSS background */
+.bg-image{
+  background-image: url("${dataUri}");
+  background-size: cover;
+  background-position: center;
+  /* original: ${imgW}×${imgH}, embedded: ${scaledW}×${scaledH} */
+}`;
+    }
+
+    // Copy / Clear
+    copyBtn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(output.textContent);
+        copyBtn.textContent = 'Copied!';
+        setTimeout(() => copyBtn.textContent = 'Copy', 900);
+      } catch (e) {
+        alert('Unable to copy.');
+      }
+    });
+    clearBtn.addEventListener('click', () => {
+      output.textContent = '/* Drop an image to generate your CSS here */';
+      dropInner.innerHTML = `
+        <div>
+          <strong>Drag & drop an image</strong> or click to select
+          <div class="hint">JPG, PNG, or WebP · processed locally in your browser</div>
+          <div class="btn-row">
+            <button id="selectBtn2" class="btn small" type="button">Select image</button>
+          </div>
+        </div>`;
+      const selectBtn2 = document.getElementById('selectBtn2');
+      if (selectBtn2) selectBtn2.addEventListener('click', () => fileInput.click());
+      fileInput.value = '';
+    });
+  </script>
+</body>
+</html>

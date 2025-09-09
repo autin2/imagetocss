@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Image to CSS — AI palettes & utility classes from any image</title>
+  <meta name="description" content="Upload an image, get production-ready CSS: color variables, utilities, and component tokens. Private by default, runs in your browser. Accounts & Pro features available."/>
+  <link rel="stylesheet" href="style.css"/>
+  <meta name="theme-color" content="#0f172a"/>
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <div class="container nav">
+      <a href="/" class="brand">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <b>Image&nbsp;to&nbsp;CSS</b>
+      </a>
+      <nav class="links" aria-label="Primary">
+        <a href="pricing.html">Pricing</a>
+        <a href="signin.html" class="btn small ghost">Sign in</a>
+        <a href="app.html" class="btn small primary">Try it out</a>
+      </nav>
+    </div>
+  </header>
+
+  <!-- Hero (only section) -->
+  <main class="hero">
+    <div class="container grid-2">
+      <div>
+        <span class="kicker"><span class="k-dot" aria-hidden="true"></span> AI-powered, privacy-friendly</span>
+        <h1>Turn any image object into css in seconds</h1>
+        <p class="lead">Drop a photo or screenshot. We extract a clean palette, generate CSS variables & utility classes, and preview components. Create an account to save palettes; Pro unlocks batch & brand tokens.</p>
+        <div style="display:flex;gap:10px;flex-wrap:wrap">
+          <a href="app.html" class="btn accent">Try it out</a>
+          <a href="signin.html" class="btn">Sign In</a>
+        </div>
+      </div>
+
+      <!-- Right: snipping-frame demo + typewriter example output -->
+      <aside>
+        <div class="hero-visual card pad">
+          <div class="snip-frame" style="margin-bottom:12px">
+            <div class="demo-card token-card" role="region" aria-label="Token-styled component">
+              <div class="demo-avatar">T</div>
+              <div>
+                <p class="demo-title">Test</p>
+                <p class="demo-sub">Test</p>
+                <div class="demo-tags">
+                  <span class="demo-tag">.bg-1</span>
+                  <span class="demo-tag">.text-2</span>
+                  <span class="demo-tag">.btn-3</span>
+                </div>
+              </div>
+              <div class="demo-cta">
+                <button class="btn">Try</button>
+              </div>
+            </div>
+          </div>
+
+          <pre class="code" id="exampleCode" aria-live="off">/* Generating… */</pre>
+        </div>
+      </aside>
+    </div>
+  </main>
+
+  <!-- Footer (tiny) -->
+  <footer class="footer">
+    <div class="container" style="display:flex;justify-content:space-between;align-items:center;height:100%">
+      <span>© <span id="y">2025</span> Image to CSS</span>
+      <span style="color:var(--muted)">Private by default</span>
+    </div>
+  </footer>
+
+  <script>
+    // Year
+    document.getElementById('y').textContent = new Date().getFullYear();
+
+    // Typewriter (slower, fixed-height code block prevents layout shifts)
+    const codeEl = document.getElementById('exampleCode');
+    const snippet =
+`/* Example output */
+:root{
+  --color-1:#0ea5e9;
+  --color-2:#111827;
+  --color-3:#f59e0b;
+  --color-4:#22c55e;
+  --ink:#0f172a;
+  --paper:#ffffff;
+}
+/* Utilities generated from your image */
+.bg-1{ background:var(--color-1); }
+.text-2{ color:var(--color-2); }
+.border-3{ border-color:var(--color-3); }
+.btn-4{
+  background:var(--color-4);
+  color:#05212c;
+  border:1px solid var(--color-4);
+  padding:10px 14px;
+  border-radius:10px;
+}
+/* Optional component tokens */
+.token-card{
+  --card-bg: var(--paper);
+  --card-ink: var(--ink);
+  --card-accent: var(--color-1);
+}`;
+
+    const prefersReduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (prefersReduce) {
+      codeEl.textContent = snippet;
+    } else {
+      const SPEED = 45;     // ms per char (slower)
+      const PAUSE = 2500;   // ms at end before restarting
+      let i = 0, timer = null, running = true;
+
+      function schedule(delay){ timer = setTimeout(tick, delay); }
+      function clearTimer(){ if (timer) { clearTimeout(timer); timer = null; } }
+
+      function tick(){
+        if (!running) return;
+        codeEl.textContent = snippet.slice(0, i++);
+        if (i <= snippet.length) {
+          schedule(SPEED);
+        } else {
+          setTimeout(() => {
+            if (!running) return;
+            i = 0; codeEl.textContent = '';
+            schedule(SPEED);
+          }, PAUSE);
+        }
+      }
+
+      // Pause when the tab isn't visible (no background CPU)
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) { running = false; clearTimer(); }
+        else { if (!running) { running = true; schedule(SPEED); } }
+      });
+
+      // Start
+      schedule(SPEED);
+    }
+  </script>
+</body>
+</html>
