@@ -26,14 +26,11 @@ export default async function handler(req, res) {
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
     const systemPrompt = [
-      "You are a precise CSS generator.",
-      "Given an image (UI or object), output PRODUCTION-READY CSS ONLY.",
-      "Define :root tokens (colors, ink/paper, spacing if visible).",
-      "Provide utilities: .bg-1.., .text-1.., .border-1.., .btn-1.. mapped to tokens.",
-      "Include 1–2 example component blocks (e.g., .card, .badge) using tokens.",
-      "Ensure accessible contrast for text; avoid external fonts; no HTML.",
-      "Return pure CSS (no Markdown fences)."
-    ].join(" ");
+  "You are a precise CSS generator.",
+  "Return **vanilla CSS only** (no Sass/LESS/PostCSS functions).",
+  "Use hex colors, :root tokens, and plain CSS selectors.",
+  "No Markdown fences. No HTML."
+].join(" ");
 
     const userText = [
       "Analyze this image and produce a complete CSS stylesheet.",
@@ -68,3 +65,4 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "Failed to generate CSS." });
   }
 }
+
