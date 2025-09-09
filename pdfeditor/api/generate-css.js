@@ -1,8 +1,8 @@
 // api/generate-css.js
-// Vision → CSS+HTML with 5-pass refine and robust HTML↔CSS coherence guard
+// Vision → CSS + HTML with 5-pass refine and robust HTML↔CSS coherence guard
 import OpenAI from "openai";
 
-const MODEL = "gpt-4o-mini";
+const MODEL = "gpt-4o-mini"; // fast, vision-capable
 
 export default async function handler(req, res) {
   try {
@@ -23,20 +23,20 @@ export default async function handler(req, res) {
 
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-    // ----- pass 1: CSS draft -----
+    // ----- PASS 1: CSS draft -----
     const draftCss = await firstPass(client, { image, palette });
     let currentCss = draftCss;
 
-    // ----- passes 2..N-1: refine CSS -----
+    // ----- PASSES 2..N-1: refine CSS -----
     const total = Math.max(1, Math.min(Number(passes) || 1, 8));
     for (let i = 2; i <= total - 1; i++) {
       currentCss = await refineCssOnly(client, { image, palette, css: currentCss, passNum: i, total });
     }
 
-    // ----- final pass: return { css, html } -----
+    // ----- FINAL PASS: return { css, html } -----
     let final = await finalCssAndHtml(client, { image, palette, css: currentCss, passNum: total, total });
 
-    // ----- GUARANTEE compatibility (no manual fixes needed) -----
+    // ----- GUARANTEE HTML↔CSS COMPATIBILITY -----
     final = ensureHtmlCssCoherence(final);
 
     res.setHeader("Cache-Control", "no-store");
@@ -67,36 +67,36 @@ function parseJsonLoose(text) {
   return null;
 }
 
-/** Make sure returned HTML & CSS actually work together. */
+/** Make sure returned HTML & CSS actually work together (no manual fixes later). */
 function ensureHtmlCssCoherence({ css = "", html = "" }) {
   let outCss = css || "";
   let outHtml = html || "";
 
-  // 1) Ensure ANY btn-variant in HTML also has the base 'btn' class.
+  // 1) Any element using a btn-variant must also include the base 'btn' class.
   outHtml = outHtml.replace(/class=(["'])(.*?)\1/g, (_m, q, classes) => {
     const toks = classes.trim().split(/\s+/).filter(Boolean);
     const hasBtn = toks.includes("btn");
-    const hasVariant = toks.some(t => /^btn(?:--|-)/.test(t));
+    const hasVariant = toks.some(t => /^btn(?:--|-)/.test(t)); // btn--*, btn-*
     if (hasVariant && !hasBtn) toks.unshift("btn");
     return `class=${q}${toks.join(" ")}${q}`;
   });
 
-  // 2) If CSS lacks a shared base that cancels link defaults, append one.
-  const needsBase =
+  // 2) Base button resets for .btn and any btn-variant.
+  const needsBtnBase =
     !/text-decoration\s*:\s*none/i.test(outCss) ||
     !/display\s*:\s*inline-flex/i.test(outCss) ||
     !/border-radius\s*:\s*999px/i.test(outCss) ||
     !/border\s*:\s*1px\s*solid/i.test(outCss) ||
     !/font-weight\s*:\s*7\d\d/i.test(outCss);
 
-  const baseTargetsAnyVariant =
-    /\.btn\s*,\s*\[class\*\="btn-"\]\s*\{[^}]*\}/is.test(outCss) ||
-    /\[class\*\="btn-"\]\s*,\s*\.btn\s*\{[^}]*\}/is.test(outCss);
+  const hasCombinedBase =
+    /\.btn\s*,\s*\[class\*="btn-"\]\s*\{[^}]*\}/is.test(outCss) ||
+    /\[class\*="btn-"\]\s*,\s*\.btn\s*\{[^}]*\}/is.test(outCss);
 
-  if (needsBase || !baseTargetsAnyVariant) {
+  if (needsBtnBase || !hasCombinedBase) {
     outCss += `
 
-/* Base styles for any "btn" element or variant ("btn-*") */
+/* Base styles for .btn and any "btn-*" variant */
 .btn, [class*="btn-"]{
   text-decoration: none;
   display: inline-flex;
@@ -106,13 +106,13 @@ function ensureHtmlCssCoherence({ css = "", html = "" }) {
   border-radius: 999px;
   font-weight: 700;
   cursor: pointer;
-  transition: filter .3s;
+  transition: filter .3s, background-color .3s, color .3s;
 }
 a.btn:visited, a[class*="btn-"]:visited{ text-decoration:none; color:inherit; }
 `;
   }
 
-  // 3) If outline lacks a visible outline, add a minimal one.
+  // 3) Ensure outline variant is visible.
   const outlineHasRule = /\.btn--outline\s*\{[^}]*\}/is.test(outCss);
   const outlineHasBorder = /(?:\.btn--outline\s*\{[^}]*)(border(?:-color)?\s*:|border\s*:)/is.test(outCss);
   if (!outlineHasRule || !outlineHasBorder) {
@@ -120,11 +120,60 @@ a.btn:visited, a[class*="btn-"]:visited{ text-decoration:none; color:inherit; }
 
 /* Minimal outline variant */
 .btn--outline{
-  background: #fff;
-  color: var(--ink, #111);
-  border: 1px solid var(--border-light, #e5e7eb);
+  background:#fff;
+  color:var(--ink, #111);
+  border:1px solid var(--border-light, #e5e7eb);
 }
-.btn:hover, [class*="btn-"]:hover{ filter: brightness(.92); }
+.btn:hover, [class*="btn-"]:hover{ filter:brightness(.92); }
+`;
+  }
+
+  // 4) If HTML contains a UL but CSS never removes bullets, add a safe list reset scoped to common containers.
+  const htmlHasUl = /<ul[\s>]/i.test(outHtml);
+  const cssResetsUl =
+    /(^|\})\s*(?:\.hero|\.card|ul(?:\.menu)?)[^{]*\{\s*[^}]*list-style\s*:\s*none/i.test(outCss);
+  if (htmlHasUl && !cssResetsUl) {
+    outCss += `
+
+/* Reset lists inside common containers */
+.hero ul, .card ul, ul.menu{
+  list-style:none;
+  margin:0;
+  padding:0;
+}
+.hero li, .card li, ul.menu li{ margin:0; padding:0; }
+.hero li a, .card li a, ul.menu li a{
+  display:block;
+  padding:12px 0;
+  text-decoration:none;
+  color:var(--ink, #111);
+}
+`;
+  }
+
+  // 5) If an avatar class is referenced but not styled, add a sensible default.
+  const htmlHasAvatar = /\bclass=(["'][^"']*\bavatar\b[^"']*["'])/i.test(outHtml);
+  const cssHasAvatar = /\.avatar\s*\{[^}]*\}/i.test(outCss);
+  if (htmlHasAvatar && !cssHasAvatar) {
+    outCss += `
+
+.avatar{
+  width:64px; height:64px;
+  border-radius:999px;
+  object-fit:cover;
+}
+`;
+  }
+
+  // 6) Prevent container-wide uppercase from leaking (scope to headings only).
+  const heroUpperOnContainer = /\.hero\s*\{[^}]*text-transform\s*:\s*uppercase[^}]*\}/i.test(outCss) &&
+                               !/\.hero\s*h1\s*\{[^}]*text-transform\s*:\s*uppercase/i.test(outCss);
+  if (heroUpperOnContainer) {
+    outCss += `
+
+/* Scope uppercase to headings */
+.hero{ text-transform:none; }
+.hero h1{ text-transform:uppercase; }
 `;
   }
 
@@ -137,7 +186,7 @@ async function firstPass(client, { image, palette }) {
   const system = [
     "You are a precise CSS generator.",
     "Return VANILLA CSS ONLY (no Sass/LESS, no Markdown fences, no HTML).",
-    "Structure: :root tokens, utilities (.bg-*, .text-*, .border-*, .btn-*), and a .hero component."
+    "Structure: :root tokens, utilities (.bg-*, .text-*, .border-*, .btn-*), and one component (.hero or .card) that matches the layout you see."
   ].join(" ");
 
   const paletteLine = palette?.length
@@ -148,8 +197,8 @@ async function firstPass(client, { image, palette }) {
     "Analyze the image and produce a complete stylesheet.",
     paletteLine,
     "Tokens must include --ink (text), --paper (background), and 3–5 brand colors.",
-    "Buttons should be rounded (pill if appropriate).",
-    "Output pure CSS only."
+    "Buttons: rounded pill; high-contrast text; valid CSS only.",
+    "If the UI looks like a profile/dashboard card (avatar, username, list of links, CTA), prefer a `.card` component with left-aligned content and divider lines."
   ].join("\n");
 
   const r = await client.chat.completions.create({
@@ -172,11 +221,11 @@ async function refineCssOnly(client, { image, palette, css, passNum, total }) {
   const user = [
     `Refine pass ${passNum} of ${total}: compare the image and CURRENT CSS; fix deviations.`,
     "- Use the provided palette (or perceptual matches).",
-    "- Hero heading: very large, extra-bold, uppercase; **negative** letter-spacing.",
-    "- Button rules MUST cancel link defaults (text-decoration:none, inline-flex, radius 999px, border:1px solid transparent, font-weight:700).",
-    "- If you introduce any variant named like 'btn-*' (e.g., btn--outline, btn-pill), ensure compatibility via a shared base selector (e.g., `.btn, [class*=\"btn-\"] { ... }`).",
-    "- Hover stays in the same color family (e.g., filter:brightness(.92)).",
-    "- Return CSS only.",
+    "- If layout resembles a dashboard/card with list items: left-align text, remove bullets, add subtle dividers, appropriate spacing.",
+    "- Headings: very large, bold; apply negative letter-spacing only where visible.",
+    "- Button rules MUST cancel link defaults (text-decoration:none, inline-flex, 1px solid transparent, radius 999px, font-weight:700).",
+    "- If you introduce any variant named like 'btn-*', ensure compatibility via a shared base selector `.btn, [class*=\"btn-\"] { ... }`.",
+    "- Hover stays in the same color family (filter:brightness(.92)).",
     "",
     "CURRENT CSS:\n```css\n" + css + "\n```",
     palette?.length ? "STRICT PALETTE: " + palette.join(", ") : "No explicit palette provided."
@@ -210,7 +259,8 @@ async function finalCssAndHtml(client, { image, palette, css, passNum, total }) 
     "  * `.btn` (base) must include ALL resets (text-decoration:none, inline-flex, 1px solid transparent, radius:999px, font-weight:700, cursor:pointer, transition:filter .3s).",
     "  * Any variant named like `btn-*` (e.g., btn--outline, btn-pill) must be compatible with `.btn`. Prefer a shared base selector `.btn, [class*=\"btn-\"] { ... }`.",
     "  * In HTML, any variant must also include the base class, e.g. `<a class=\"btn btn--outline\">` or `<a class=\"btn btn-pill\">`.",
-    "- Headline is large, extra-bold, uppercase; negative letter-spacing.",
+    "- If the screenshot looks like a card dashboard: output a `.card` container (or `.hero` if it’s clearly a hero), a profile header (optional avatar), a vertical menu as a `<ul>` with bulletless items, a prominent pill CTA, and a footer section with subtle separator.",
+    "- Do NOT apply `text-transform: uppercase` to an entire container; only to headings if clearly uppercase in the image.",
     "- Use ONLY the given palette when possible: " + (palette?.length ? palette.join(", ") : "(no explicit palette)"),
     "",
     "CURRENT CSS:",
@@ -224,7 +274,7 @@ async function finalCssAndHtml(client, { image, palette, css, passNum, total }) 
   const r = await client.chat.completions.create({
     model: MODEL,
     temperature: 0.1,
-    max_tokens: 1700,
+    max_tokens: 1800,
     messages: [
       { role: "system", content: system },
       { role: "user", content: [
