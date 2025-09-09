@@ -64,6 +64,17 @@
       <pre id="outputFinal" class="code" aria-live="polite">/* The refined CSS will appear here */</pre>
     </section>
 
+    <!-- NEW: HTML markup box -->
+    <section class="card pad" style="margin-top:14px" aria-labelledby="htmlLabel">
+      <div class="outputbar">
+        <span id="htmlLabel" class="label">HTML markup (copy)</span>
+        <div>
+          <button id="copyHtml" class="btn small" type="button">Copy HTML</button>
+        </div>
+      </div>
+      <pre id="outputHtml" class="code" aria-live="polite"><!-- Your HTML snippet will appear here --></pre>
+    </section>
+
     <!-- Optional: view all passes -->
     <section class="card pad" style="margin-top:14px" aria-labelledby="allLabel">
       <details id="allPasses">
@@ -91,8 +102,10 @@
     const selectBtn = document.getElementById('selectBtn');
     const outputDraft = document.getElementById('outputDraft');
     const outputFinal = document.getElementById('outputFinal');
+    const outputHtml = document.getElementById('outputHtml');
     const copyDraft = document.getElementById('copyDraft');
     const copyFinal = document.getElementById('copyFinal');
+    const copyHtml  = document.getElementById('copyHtml');
     const clearBtn = document.getElementById('clearBtn');
     const versionsWrap = document.getElementById('versionsWrap');
     const outLabel2 = document.getElementById('outLabel2');
@@ -170,6 +183,49 @@
       return chosen.slice(0, Math.max(4, Math.min(count, 6)));
     }
 
+    // --- Build an HTML snippet that matches the refined CSS as best as possible ---
+    function buildHtmlSnippet(cssText = '') {
+      const has = (re) => re.test(cssText);
+
+      // Try to detect button classes from the model output
+      const btnCandidatesPrimary = ['btn-1','btn-primary','btn'];
+      const btnCandidatesOutline = ['btn-outline','btn-2','btn ghost','btn-secondary','btn'];
+
+      const pickClass = (names) => {
+        for (const n of names) {
+          const re = new RegExp('\\.' + n.replace(/\s+/g,'\\s+') + '\\b');
+          if (has(re)) return n;
+        }
+        return null;
+      };
+
+      const primaryBtn = pickClass(btnCandidatesPrimary) || 'btn';
+      const outlineBtn = pickClass(btnCandidatesOutline) || null;
+
+      const heroClass = has(/\.hero\b/) ? 'hero' : '';
+      const bg1 = has(/\.bg-1\b/) ? 'bg-1' : '';
+      const text1 = has(/\.text-1\b/) ? 'text-1' : '';
+      const text3 = has(/\.text-3\b/) ? 'text-3' : '';
+
+      // Outline button fallback if model did not provide one
+      const outlineAttrs = outlineBtn
+        ? `class="${outlineBtn}"`
+        : `class="${primaryBtn}" style="background:var(--paper);border:1px solid var(--border, var(--border-light,#e5e7eb))"`;
+
+      return `<!-- Hero -->
+<section class="${[heroClass, bg1].filter(Boolean).join(' ')}">
+  <div style="max-width:1100px;margin:0 auto;text-align:center;padding:50px 20px">
+    <h1 class="${text1}">CONNECT YOUR MONEY WORLDWIDE</h1>
+    <p class="${text3}" style="${text3?'':'color:var(--brand-gray)'}">Pay and get paid globally. Fast, simple and secure.</p>
+
+    <div style="display:flex;gap:12px;justify-content:center;margin-top:16px">
+      <a href="#" class="${primaryBtn}">Send money now</a>
+      <a href="#" ${outlineAttrs}>How our transfers work</a>
+    </div>
+  </div>
+</section>`;
+    }
+
     // Handle file: preview + call API (5 passes)
     async function handleFile(file){
       if (!file.type.startsWith('image/')) {
@@ -198,6 +254,7 @@
 
         outputDraft.textContent = `/* Analyzing (pass 1)...\nPalette: ${palette.join(", ")} */`;
         outputFinal.textContent = '/* Refining (passes 2–5)... */';
+        outputHtml.textContent = '<!-- Your HTML snippet will appear here -->';
         versionsWrap.innerHTML = '';
 
         try {
@@ -231,12 +288,16 @@
             });
           }
 
-          // Apply :root from refined if present
+          // Apply :root tokens to document (so your demo styles react)
           tryApplyTokensToDemo(outputFinal.textContent);
+
+          // Build + show HTML snippet that fits the refined CSS
+          outputHtml.textContent = buildHtmlSnippet(outputFinal.textContent);
         } catch (e) {
           console.error(e);
           outputDraft.textContent = '/* Failed to generate. */';
           outputFinal.textContent = '/* Failed to refine. */';
+          outputHtml.textContent = '<!-- Failed to build HTML snippet -->';
         } finally {
           setTimeout(() => URL.revokeObjectURL(url), 1500);
         }
@@ -254,7 +315,7 @@
       document.head.appendChild(styleTag);
     }
 
-    // Copy / Clear
+    // Copy buttons
     copyDraft.addEventListener('click', async () => {
       try { await navigator.clipboard.writeText(outputDraft.textContent); copyDraft.textContent='Copied!'; setTimeout(()=>copyDraft.textContent='Copy draft', 900); }
       catch { alert('Unable to copy.'); }
@@ -263,9 +324,16 @@
       try { await navigator.clipboard.writeText(outputFinal.textContent); copyFinal.textContent='Copied!'; setTimeout(()=>copyFinal.textContent='Copy refined', 900); }
       catch { alert('Unable to copy.'); }
     });
+    copyHtml.addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(outputHtml.textContent); copyHtml.textContent='Copied!'; setTimeout(()=>copyHtml.textContent='Copy HTML', 900); }
+      catch { alert('Unable to copy.'); }
+    });
+
+    // Clear
     clearBtn.addEventListener('click', () => {
       outputDraft.textContent = '/* Drop an image to generate your CSS here */';
       outputFinal.textContent = '/* The refined CSS will appear here */';
+      outputHtml.textContent  = '<!-- Your HTML snippet will appear here -->';
       versionsWrap.innerHTML = '';
       dropInner.innerHTML = `
         <div>
