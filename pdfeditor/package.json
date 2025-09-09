@@ -1,0 +1,6 @@
+{
+  "name": "image-to-css",
+  "private": true,
+  "type": "module",
+  "dependencies": { "openai": "^4.57.0" }
+}
