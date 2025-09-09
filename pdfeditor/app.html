@@ -9,7 +9,7 @@
   <meta name="theme-color" content="#0f172a"/>
 </head>
 <body class="is-app">
-  <!-- Header (same shell) -->
+  <!-- Header -->
   <header class="header">
     <div class="container nav">
       <a href="/" class="brand">
@@ -63,7 +63,7 @@
   </footer>
 
   <script>
-    // Keep year fresh
+    // Year
     document.getElementById('y').textContent = new Date().getFullYear();
 
     // Elements
@@ -77,10 +77,7 @@
 
     // Click/select behavior
     selectBtn.addEventListener('click', () => fileInput.click());
-    drop.addEventListener('click', (e) => {
-      // avoid click when an image is already shown (still open file chooser)
-      fileInput.click();
-    });
+    drop.addEventListener('click', () => fileInput.click());
     drop.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.click(); }
     });
@@ -101,15 +98,29 @@
       if (f) handleFile(f);
     });
 
-    // Core: show preview and print a placeholder CSS snippet (no AI yet)
-    function handleFile(file){
+    // Convert to data URI (with downscale)
+    function toDataUri(img, maxSide = 1600){
+      const ratio = Math.min(maxSide / img.width, maxSide / img.height, 1);
+      const w = Math.max(1, Math.round(img.width * ratio));
+      const h = Math.max(1, Math.round(img.height * ratio));
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      const cx = c.getContext('2d', { willReadFrequently: true });
+      cx.drawImage(img, 0, 0, w, h);
+      const dataUri = c.toDataURL('image/png', 0.9);
+      return { dataUri, w, h };
+    }
+
+    // Handle file: preview + call API
+    async function handleFile(file){
       if (!file.type.startsWith('image/')) {
         alert('Please choose an image file.');
         return;
       }
+
       const img = new Image();
       const url = URL.createObjectURL(file);
-      img.onload = () => {
+      img.onload = async () => {
         // Render preview
         dropInner.innerHTML = '';
         const wrap = document.createElement('div');
@@ -123,61 +134,41 @@
         wrap.appendChild(details);
         dropInner.appendChild(wrap);
 
-        // Make a smaller dataURI for background usage (cap longest side to 1200px)
-        const { dataUri, scaledW, scaledH } = toDataUri(img, 1200);
+        // Build data URL and send to API
+        const { dataUri } = toDataUri(img, 1600);
+        output.textContent = '/* Analyzing image with AI… */';
 
-        // Placeholder CSS (hook up your AI logic later)
-        output.textContent = buildCssPlaceholder({file, imgW: img.width, imgH: img.height, dataUri, scaledW, scaledH});
+        try {
+          const r = await fetch('/api/generate-css', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ image: dataUri })
+          });
+          const data = await r.json();
+          if (!r.ok) throw new Error(data.error || 'Error');
+          const css = (data.css || '').trim();
+          output.textContent = css || '/* No CSS returned. Try another image. */';
 
-        // Revoke object URL later
-        setTimeout(() => URL.revokeObjectURL(url), 1500);
+          // Apply :root tokens to the page demo if present
+          tryApplyTokensToDemo(css);
+        } catch (e) {
+          console.error(e);
+          output.textContent = '/* Failed to generate CSS. Try another image. */';
+        } finally {
+          setTimeout(() => URL.revokeObjectURL(url), 1500);
+        }
       };
       img.onerror = () => alert('Could not load that image.');
       img.src = url;
     }
 
-    function toDataUri(img, maxSide = 1200){
-      const ratio = Math.min(maxSide / img.width, maxSide / img.height, 1);
-      const w = Math.max(1, Math.round(img.width * ratio));
-      const h = Math.max(1, Math.round(img.height * ratio));
-      const c = document.createElement('canvas');
-      c.width = w; c.height = h;
-      const cx = c.getContext('2d', { willReadFrequently: true });
-      cx.drawImage(img, 0, 0, w, h);
-      const dataUri = c.toDataURL('image/png', 0.9);
-      return { dataUri, scaledW: w, scaledH: h };
-    }
-
-    function buildCssPlaceholder({file, imgW, imgH, dataUri, scaledW, scaledH}){
-      return `/* Placeholder output — plug in your AI to replace this with real tokens */
-:root{
-  --color-1:#0ea5e9; /* example */
-  --color-2:#111827;
-  --color-3:#f59e0b;
-  --color-4:#22c55e;
-  --ink:#0f172a;
-  --paper:#ffffff;
-}
-
-/* Utilities (examples) */
-.bg-1{ background:var(--color-1); }
-.text-2{ color:var(--color-2); }
-.border-3{ border-color:var(--color-3); }
-.btn-4{
-  background:var(--color-4);
-  color:#05212c;
-  border:1px solid var(--color-4);
-  padding:10px 14px;
-  border-radius:10px;
-}
-
-/* Optional: use your image as a CSS background */
-.bg-image{
-  background-image: url("${dataUri}");
-  background-size: cover;
-  background-position: center;
-  /* original: ${imgW}×${imgH}, embedded: ${scaledW}×${scaledH} */
-}`;
+    // Inject :root { ... } into document so the demo card reflects the output
+    function tryApplyTokensToDemo(cssText){
+      const m = cssText.match(/:root\s*\{([\s\S]*?)\}/);
+      if (!m) return;
+      const styleTag = document.getElementById('generated-root') || Object.assign(document.createElement('style'), { id: 'generated-root' });
+      styleTag.textContent = `:root{${m[1]}}`;
+      document.head.appendChild(styleTag);
     }
 
     // Copy / Clear
@@ -186,9 +177,7 @@
         await navigator.clipboard.writeText(output.textContent);
         copyBtn.textContent = 'Copied!';
         setTimeout(() => copyBtn.textContent = 'Copy', 900);
-      } catch (e) {
-        alert('Unable to copy.');
-      }
+      } catch { alert('Unable to copy.'); }
     });
     clearBtn.addEventListener('click', () => {
       output.textContent = '/* Drop an image to generate your CSS here */';
@@ -196,9 +185,7 @@
         <div>
           <strong>Drag & drop an image</strong> or click to select
           <div class="hint">JPG, PNG, or WebP · processed locally in your browser</div>
-          <div class="btn-row">
-            <button id="selectBtn2" class="btn small" type="button">Select image</button>
-          </div>
+          <div class="btn-row"><button id="selectBtn2" class="btn small" type="button">Select image</button></div>
         </div>`;
       const selectBtn2 = document.getElementById('selectBtn2');
       if (selectBtn2) selectBtn2.addEventListener('click', () => fileInput.click());
