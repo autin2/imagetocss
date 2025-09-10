@@ -1,0 +1,161 @@
+<!-- Save as: inspector.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>URL Inspector — pick elements from any page</title>
+  <link rel="stylesheet" href="style.css"/>
+  <style>
+    :root{
+      --ink:#0f172a; --muted:#64748b; --accent:#22c55e; --border:#e5e7eb; --paper:#ffffff;
+    }
+    body{ margin:0; font:14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; color:var(--ink); background:#f8fafc; }
+    .container{ max-width:1100px; margin:24px auto; padding:0 16px; }
+    .toolbar{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:12px; }
+    .input{ padding:10px 12px; border:1px solid var(--border); border-radius:10px; width:480px; max-width:100%; }
+    .btn{ display:inline-flex; align-items:center; gap:8px; padding:10px 14px; border:1px solid var(--border); background:#fff; border-radius:10px; cursor:pointer; font-weight:600; }
+    .btn.primary{ background:#2563eb; color:#fff; border-color:#2563eb; }
+    .btn.ghost{ background:#fff; }
+    .btn.active{ outline:2px solid var(--accent); }
+    .row{ display:grid; grid-template-columns: 1fr 320px; gap:14px; }
+    @media (max-width: 980px){ .row{ grid-template-columns: 1fr; } }
+
+    /* Snipping frame */
+    .snip-frame{ position:relative; background:#fff; border:1px dashed var(--border); border-radius:12px; overflow:hidden; }
+    .snip-frame::before, .snip-frame::after{
+      content:""; position:absolute; inset:0; pointer-events:none;
+      background:
+        linear-gradient(90deg, transparent 12px, #94a3b8 12px, #94a3b8 14px, transparent 14px) top left,
+        linear-gradient(0deg, transparent 12px, #94a3b8 12px, #94a3b8 14px, transparent 14px) top left,
+        linear-gradient(90deg, transparent 12px, #94a3b8 12px, #94a3b8 14px, transparent 14px) bottom right,
+        linear-gradient(0deg, transparent 12px, #94a3b8 12px, #94a3b8 14px, transparent 14px) bottom right;
+      background-size: 16px 16px, 16px 16px, 16px 16px, 16px 16px;
+      background-repeat:no-repeat;
+      border-radius:12px;
+    }
+
+    .viewer-toolbar{
+      display:flex; justify-content:space-between; align-items:center;
+      padding:10px 12px; border-bottom:1px solid var(--border); background:var(--paper);
+    }
+    .viewer{ position:relative; height:640px; background:#fff; }
+    .viewer iframe{ position:absolute; inset:0; width:100%; height:100%; border:0; background:#fff; }
+
+    /* Details side panel */
+    .side{ background:#fff; border:1px solid var(--border); border-radius:12px; }
+    .side .head{ padding:10px 12px; border-bottom:1px solid var(--border); font-weight:700; }
+    .side .body{ padding:10px 12px; }
+    .k{ color:var(--muted); }
+    .code{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background:#0b1020; color:#e2e8f0; padding:10px; border-radius:8px; overflow:auto; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1 style="margin:0 0 8px">URL inspector</h1>
+    <p style="margin:0 0 16px; color:var(--muted)">Enter a URL, render it in the snipping frame, then click <b>Pick elements</b> to highlight & copy selectors.</p>
+
+    <div class="toolbar">
+      <input id="url" class="input" type="url" placeholder="https://example.com" spellcheck="false"/>
+      <button id="load" class="btn primary">Load</button>
+      <button id="pick" class="btn ghost" title="Toggle element picker">Pick elements</button>
+      <button id="copy" class="btn ghost" title="Copy last selector">Copy selector</button>
+    </div>
+
+    <div class="row">
+      <!-- Left: snipping-frame + viewer -->
+      <section class="snip-frame">
+        <div class="viewer-toolbar">
+          <div class="k">Rendered page</div>
+          <div id="status" class="k">Idle</div>
+        </div>
+        <div class="viewer">
+          <iframe id="view"
+                  title="Website preview"
+                  sandbox="allow-scripts allow-forms allow-pointer-lock allow-popups allow-popups-to-escape-sandbox allow-modals allow-same-origin"></iframe>
+        </div>
+      </section>
+
+      <!-- Right: selection details -->
+      <aside class="side">
+        <div class="head">Selection</div>
+        <div class="body">
+          <div><span class="k">Tag:</span> <span id="tag">–</span></div>
+          <div><span class="k">ID:</span> <span id="sid">–</span></div>
+          <div><span class="k">Classes:</span> <span id="classes">–</span></div>
+          <div><span class="k">Size:</span> <span id="size">–</span></div>
+          <div style="margin-top:10px">
+            <div class="k" style="margin-bottom:6px">Selector</div>
+            <pre id="selector" class="code" style="min-height:84px">/* click Pick, then click an element */</pre>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <script>
+    const urlEl = document.getElementById('url');
+    const loadBtn = document.getElementById('load');
+    const pickBtn = document.getElementById('pick');
+    const copyBtn = document.getElementById('copy');
+    const statusEl = document.getElementById('status');
+    const view = document.getElementById('view');
+
+    const tagEl = document.getElementById('tag');
+    const idEl = document.getElementById('sid');
+    const classesEl = document.getElementById('classes');
+    const sizeEl = document.getElementById('size');
+    const selectorEl = document.getElementById('selector');
+
+    let picking = false;
+    let lastSelector = "";
+
+    loadBtn.addEventListener('click', () => loadUrl(urlEl.value));
+    urlEl.addEventListener('keydown', e => { if (e.key === 'Enter') loadUrl(urlEl.value); });
+
+    pickBtn.addEventListener('click', () => {
+      picking = !picking;
+      pickBtn.classList.toggle('active', picking);
+      if (view.contentWindow) {
+        view.contentWindow.postMessage({ type: 'toggle-picker', picking }, '*');
+      }
+    });
+
+    copyBtn.addEventListener('click', async () => {
+      if (!lastSelector) return;
+      try { await navigator.clipboard.writeText(lastSelector); copyBtn.textContent = 'Copied!'; setTimeout(()=>copyBtn.textContent='Copy selector', 900); }
+      catch {}
+    });
+
+    async function loadUrl(raw){
+      const u = (raw || "").trim();
+      if (!u) { alert("Enter a URL"); return; }
+      statusEl.textContent = 'Loading…';
+      const encoded = encodeURIComponent(u);
+      // Load through our proxy, which returns HTML (same-origin), so we can inject picker.
+      view.src = `/api/proxy?u=${encoded}`;
+    }
+
+    // Receive selection info sent from inside the iframe
+    window.addEventListener('message', (e) => {
+      const { type, payload } = e.data || {};
+      if (type === 'picker-ready') {
+        statusEl.textContent = 'Ready';
+        if (picking) view.contentWindow.postMessage({ type:'toggle-picker', picking:true }, '*');
+      } else if (type === 'hover') {
+        statusEl.textContent = `Hover: ${payload.tag}`;
+      } else if (type === 'select') {
+        const { tag, id, classes, rect, selector } = payload;
+        tagEl.textContent = tag || '–';
+        idEl.textContent = id || '–';
+        classesEl.textContent = classes?.join('.') || '–';
+        sizeEl.textContent = rect ? `${Math.round(rect.width)}×${Math.round(rect.height)}` : '–';
+        selectorEl.textContent = selector || '–';
+        lastSelector = selector || '';
+      }
+    });
+
+    view.addEventListener('load', () => { statusEl.textContent = 'Booting…'; });
+  </script>
+</body>
+</html>
