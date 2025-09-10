@@ -4,7 +4,7 @@
 
 import OpenAI from "openai";
 
-// Default model; override with OPENAI_MODEL if you want (e.g., gpt-5-mini)
+// Default model; override with OPENAI_MODEL (e.g., "gpt-5-mini")
 const MODEL = process.env.OPENAI_MODEL || "gpt-5";
 
 // If using Next.js Pages API
@@ -21,7 +21,7 @@ export default async function handler(req, res) {
     const {
       image,
       palette = [],
-      double_checks = 6,      // 1–8
+      double_checks = 6,  // 1–8
       scope = ".comp",
       component = "component",
     } = data || {};
@@ -36,7 +36,7 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: "OPENAI_API_KEY not configured" });
     }
 
-    // Size guard (tweak to your runtime’s limits)
+    // Size guard (adjust to your runtime)
     const approxBytes = Buffer.byteLength(image, "utf8");
     const MAX_BYTES = 4.5 * 1024 * 1024;
     if (approxBytes > MAX_BYTES) {
@@ -121,23 +121,29 @@ function enforceScope(inputCss = "", scope = ".comp") {
   return css.trim();
 }
 
-/** Get assistant text from Responses API result (robust across SDK shapes). */
+/** Extract text from Responses API result. */
 function extractText(r) {
   if (typeof r?.output_text === "string") return r.output_text;
+  const chunks = [];
   try {
-    const chunks = [];
-    for (const item of (r?.output || [])) {
-      if (item?.type === "message" && Array.isArray(item.content)) {
-        for (const c of item.content) {
-          // Some SDKs use 'output_text', some 'text'
-          if (typeof c?.text === "string") chunks.push(c.text);
+    if (Array.isArray(r?.output)) {
+      for (const item of r.output) {
+        // Newer shape: items of type 'output_text'
+        if (item?.type === "output_text" && typeof item?.text === "string") {
+          chunks.push(item.text);
+        }
+        // Some SDKs nest 'message' → content[]
+        if (item?.type === "message" && Array.isArray(item?.content)) {
+          for (const c of item.content) {
+            if (c?.type === "output_text" && typeof c?.text === "string") {
+              chunks.push(c.text);
+            }
+          }
         }
       }
     }
-    return chunks.join("");
-  } catch {
-    return "";
-  }
+  } catch {}
+  return chunks.join("");
 }
 
 /* ================= model passes (Responses API) ================= */
@@ -164,11 +170,11 @@ async function passDraft(client, { image, palette, scope, component }) {
     model: MODEL,
     max_output_tokens: 1400,
     input: [
-      { role: "system", content: [{ type: "text", text: sys }] },
+      { role: "system", content: [{ type: "input_text", text: sys }] },
       {
         role: "user",
         content: [
-          { type: "text", text: usr },
+          { type: "input_text", text: usr },
           { type: "input_image", image_url: image },
         ],
       },
@@ -202,11 +208,11 @@ async function passCritique(client, { image, css, palette, scope, component, cyc
     model: MODEL,
     max_output_tokens: 900,
     input: [
-      { role: "system", content: [{ type: "text", text: sys }] },
+      { role: "system", content: [{ type: "input_text", text: sys }] },
       {
         role: "user",
         content: [
-          { type: "text", text: usr },
+          { type: "input_text", text: usr },
           { type: "input_image", image_url: image },
         ],
       },
@@ -245,11 +251,11 @@ async function passFix(client, { image, css, critique, palette, scope, component
     model: MODEL,
     max_output_tokens: 1600,
     input: [
-      { role: "system", content: [{ type: "text", text: sys }] },
+      { role: "system", content: [{ type: "input_text", text: sys }] },
       {
         role: "user",
         content: [
-          { type: "text", text: usr },
+          { type: "input_text", text: usr },
           { type: "input_image", image_url: image },
         ],
       },
