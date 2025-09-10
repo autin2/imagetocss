@@ -4,9 +4,16 @@
 
 import OpenAI from "openai";
 
-// === Model config ===
-// Use GPT-5 by default; allow override via env for quick A/B tests (e.g. gpt-5-mini)
+// Use GPT-5 by default; allow override
 const MODEL = process.env.OPENAI_MODEL || "gpt-5";
+
+// If you're on Next.js Pages API, disable the built-in bodyParser
+// (we'll read the stream ourselves, but also support req.body if present)
+export const config = {
+  api: {
+    bodyParser: false,
+  },
+};
 
 export default async function handler(req, res) {
   try {
@@ -15,22 +22,36 @@ export default async function handler(req, res) {
       return res.status(405).json({ error: "Method not allowed" });
     }
 
-    // raw body (Vercel)
-    let body = "";
-    for await (const chunk of req) body += chunk;
+    // ---- Read JSON body robustly ----
+    const data = await readJson(req);
     const {
       image,
       palette = [],
-      double_checks = 6,       // default 6 critique/fix cycles
-      scope = ".comp",         // root scope class
-      component = "component"  // hint: "button", "card", "input", etc.
-    } = JSON.parse(body || "{}");
+      double_checks = 6,
+      scope = ".comp",
+      component = "component",
+    } = data || {};
 
+    // ---- Quick guards ----
     if (!image || typeof image !== "string" || !image.startsWith("data:image")) {
-      return res.status(400).json({ error: "Send { image: dataUrl, palette?, double_checks?, scope?, component? }" });
+      return res.status(400).json({
+        error:
+          "Bad request: send JSON { image: <data:image/...;base64,>, palette?, double_checks?, scope?, component? } with Content-Type: application/json",
+      });
     }
     if (!process.env.OPENAI_API_KEY) {
       return res.status(500).json({ error: "OPENAI_API_KEY not configured" });
+    }
+
+    // ---- Optional size guard (rough check on payload size) ----
+    const approxBytes = Buffer.byteLength(image, "utf8");
+    // Tweak as needed; keep it conservative for serverless
+    const MAX_BYTES = 4.5 * 1024 * 1024; // ~4.5MB
+    if (approxBytes > MAX_BYTES) {
+      return res.status(413).json({
+        error:
+          "Image too large. Try a tighter crop or compress the screenshot (target < ~4MB).",
+      });
     }
 
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -45,8 +66,25 @@ export default async function handler(req, res) {
     // ---------- DOUBLE-CHECKS (Critique → Fix) ----------
     const cycles = Math.max(1, Math.min(Number(double_checks) || 1, 8));
     for (let i = 1; i <= cycles; i++) {
-      lastCritique = await passCritique(client, { image, css, palette, scope, component, cycle: i, total: cycles });
-      let fixed = await passFix(client, { image, css, critique: lastCritique, palette, scope, component, cycle: i, total: cycles });
+      lastCritique = await passCritique(client, {
+        image,
+        css,
+        palette,
+        scope,
+        component,
+        cycle: i,
+        total: cycles,
+      });
+      let fixed = await passFix(client, {
+        image,
+        css,
+        critique: lastCritique,
+        palette,
+        scope,
+        component,
+        cycle: i,
+        total: cycles,
+      });
       fixed = enforceScope(fixed, scope);
       css = fixed;
       versions.push(css);
@@ -57,22 +95,62 @@ export default async function handler(req, res) {
       draft,
       css,
       versions,
-      passes: 1 + cycles * 2, // 1 draft + (critique+fix)*cycles
+      passes: 1 + cycles * 2,
       palette,
       notes: lastCritique,
       scope,
-      component
+      component,
     });
   } catch (err) {
-    console.error(err);
-    return res.status(500).json({ error: "Failed to generate CSS." });
+    // Surface real error details
+    const status =
+      err?.status ||
+      err?.statusCode ||
+      err?.response?.status ||
+      (String(err?.message || "").includes("JSON body") ? 400 : 500);
+
+    // Log full details
+    console.error("[/api/generate-css] Error:", err?.message || err);
+    if (err?.response?.data) {
+      console.error("[openai-error-data]", err.response.data);
+    }
+
+    // Return a helpful payload
+    return res.status(status).json({
+      error: err?.message || "Failed to generate CSS.",
+      details: err?.response?.data || undefined,
+    });
   }
 }
 
 /* ================= helpers ================= */
 
+async function readJson(req) {
+  // If another middleware already parsed JSON:
+  if (req.body && typeof req.body === "object") return req.body;
+
+  // Validate Content-Type when possible
+  const ct = (req.headers["content-type"] || "").toLowerCase();
+  if (!ct.includes("application/json")) {
+    // We still try to parse, but warn via error if it fails
+  }
+
+  let raw = "";
+  for await (const chunk of req) raw += chunk;
+  if (!raw) throw new Error("JSON body required but request body was empty.");
+
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    throw new Error("Invalid JSON in request body.");
+  }
+}
+
 function cssOnly(text = "") {
-  return String(text).replace(/^```(?:css)?\s*/i, "").replace(/```$/i, "").trim();
+  return String(text)
+    .replace(/^```(?:css)?\s*/i, "")
+    .replace(/```$/i, "")
+    .trim();
 }
 function textOnly(s = "") {
   return String(s).replace(/```[\s\S]*?```/g, "").trim();
@@ -80,7 +158,6 @@ function textOnly(s = "") {
 
 /**
  * Enforce scope: prefix all non-@ rules (except :root) with the scope class.
- * Pragmatic regex guard that covers common outputs.
  */
 function enforceScope(inputCss = "", scope = ".comp") {
   let css = cssOnly(inputCss);
@@ -88,8 +165,8 @@ function enforceScope(inputCss = "", scope = ".comp") {
   css = css.replace(/(^|})\s*([^@}{]+?)\s*\{/g, (m, p1, selectors) => {
     const scoped = selectors
       .split(",")
-      .map(s => s.trim())
-      .map(sel => {
+      .map((s) => s.trim())
+      .map((sel) => {
         if (!sel || sel.startsWith(scope) || sel.startsWith(":root")) return sel;
         return `${scope} ${sel}`;
       })
@@ -103,7 +180,6 @@ function enforceScope(inputCss = "", scope = ".comp") {
 /* ================= model passes ================= */
 
 async function passDraft(client, { image, palette, scope, component }) {
-  // Emphasize: photo/cropped screenshot of ONE component — never full page
   const sys =
     "You are a front-end CSS engine. Output VALID vanilla CSS only (no HTML/Markdown). " +
     "Input is a PHOTO or CROPPED SCREENSHOT of ONE UI COMPONENT (not a full page). " +
@@ -113,29 +189,31 @@ async function passDraft(client, { image, palette, scope, component }) {
     "(3) Keep styles minimal, faithful to the photo, and practical.";
 
   const usr = [
-      `SCOPE CLASS: ${scope}`,
-      `COMPONENT TYPE (hint): ${component}`,
-      "Task: Study the SINGLE component in the photo and output CSS for that component ONLY.",
-      "Do NOT invent page structures or unrelated styles. No body/html/universal selectors.",
-      "If states (hover/focus/disabled) are clearly implied, include them; otherwise omit.",
-      palette?.length
-        ? `Optional palette tokens (use only if they match the look): ${palette.join(", ")}`
-        : "No palette tokens required.",
-      "Return CSS ONLY."
-    ].join("\n");
+    `SCOPE CLASS: ${scope}`,
+    `COMPONENT TYPE (hint): ${component}`,
+    "Task: Study the SINGLE component in the photo and output CSS for that component ONLY.",
+    "Do NOT invent page structures or unrelated styles. No body/html/universal selectors.",
+    "If states (hover/focus/disabled) are clearly implied, include them; otherwise omit.",
+    palette?.length
+      ? `Optional palette tokens (use only if they match the look): ${palette.join(", ")}`
+      : "No palette tokens required.",
+    "Return CSS ONLY.",
+  ].join("\n");
 
   const r = await client.chat.completions.create({
     model: MODEL,
     temperature: 0.15,
     max_tokens: 1400,
-    // You can add: reasoning: { effort: "minimal" } if your SDK supports it on Chat Completions.
     messages: [
       { role: "system", content: sys },
-      { role: "user", content: [
+      {
+        role: "user",
+        content: [
           { type: "text", text: usr },
-          { type: "image_url", image_url: { url: image } }
-        ] }
-    ]
+          { type: "image_url", image_url: { url: image } },
+        ],
+      },
+    ],
   });
 
   return cssOnly(r?.choices?.[0]?.message?.content || "");
@@ -149,17 +227,17 @@ async function passCritique(client, { image, css, palette, scope, component, cyc
     "Ensure selectors remain under the provided scope. Be terse.";
 
   const usr = [
-      `Critique ${cycle}/${total} (component-level only).`,
-      `SCOPE CLASS: ${scope}`,
-      `COMPONENT TYPE (hint): ${component}`,
-      "List actionable corrections with target selectors when possible.",
-      "",
-      "CURRENT CSS:",
-      "```css",
-      css,
-      "```",
-      palette?.length ? `Palette hint: ${palette.join(", ")}` : ""
-    ].join("\n");
+    `Critique ${cycle}/${total} (component-level only).`,
+    `SCOPE CLASS: ${scope}`,
+    `COMPONENT TYPE (hint): ${component}`,
+    "List actionable corrections with target selectors when possible.",
+    "",
+    "CURRENT CSS:",
+    "```css",
+    css,
+    "```",
+    palette?.length ? `Palette hint: ${palette.join(", ")}` : "",
+  ].join("\n");
 
   const r = await client.chat.completions.create({
     model: MODEL,
@@ -167,11 +245,14 @@ async function passCritique(client, { image, css, palette, scope, component, cyc
     max_tokens: 900,
     messages: [
       { role: "system", content: sys },
-      { role: "user", content: [
+      {
+        role: "user",
+        content: [
           { type: "text", text: usr },
-          { type: "image_url", image_url: { url: image } }
-        ] }
-    ]
+          { type: "image_url", image_url: { url: image } },
+        ],
+      },
+    ],
   });
 
   return textOnly(r?.choices?.[0]?.message?.content || "");
@@ -184,23 +265,23 @@ async function passFix(client, { image, css, critique, palette, scope, component
     "All selectors must remain under the provided scope. No global resets, no page-level structures.";
 
   const usr = [
-      `Fix ${cycle}/${total} for the component.`,
-      `SCOPE CLASS: ${scope}`,
-      `COMPONENT TYPE (hint): ${component}`,
-      "Rules:",
-      "- Keep all selectors under the scope.",
-      "- No body/html/universal selectors. No page-level structures.",
-      "- Adjust alignment, spacing, borders, radius, colors, typography, and states to match the photo.",
-      "",
-      "CRITIQUE:",
-      critique || "(none)",
-      "",
-      "CURRENT CSS:",
-      "```css",
-      css,
-      "```",
-      palette?.length ? `Palette hint (optional): ${palette.join(", ")}` : ""
-    ].join("\n");
+    `Fix ${cycle}/${total} for the component.`,
+    `SCOPE CLASS: ${scope}`,
+    `COMPONENT TYPE (hint): ${component}`,
+    "Rules:",
+    "- Keep all selectors under the scope.",
+    "- No body/html/universal selectors. No page-level structures.",
+    "- Adjust alignment, spacing, borders, radius, colors, typography, and states to match the photo.",
+    "",
+    "CRITIQUE:",
+    critique || "(none)",
+    "",
+    "CURRENT CSS:",
+    "```css",
+    css,
+    "```",
+    palette?.length ? `Palette hint (optional): ${palette.join(", ")}` : "",
+  ].join("\n");
 
   const r = await client.chat.completions.create({
     model: MODEL,
@@ -208,11 +289,14 @@ async function passFix(client, { image, css, critique, palette, scope, component
     max_tokens: 1600,
     messages: [
       { role: "system", content: sys },
-      { role: "user", content: [
+      {
+        role: "user",
+        content: [
           { type: "text", text: usr },
-          { type: "image_url", image_url: { url: image } }
-        ] }
-    ]
+          { type: "image_url", image_url: { url: image } },
+        ],
+      },
+    ],
   });
 
   return cssOnly(r?.choices?.[0]?.message?.content || css);
