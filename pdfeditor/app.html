@@ -3,160 +3,89 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Image → CSS (Component-only)</title>
-  <style>
-    :root{
-      --bg:#f7f9fc; --ink:#0f172a; --muted:#64748b; --paper:#ffffff; --border:#e5e7eb;
-      --accent:#0ea5e9; --accent-ink:#06222c; --ok:#16a34a; --err:#ef4444;
-      --radius:14px; --shadow:0 8px 24px rgba(2,6,23,.06);
-      --panelH:560px; --dash:#d8dee6;
-    }
-    *{box-sizing:border-box}
-    body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,Arial}
-    .wrap{max-width:1100px;margin:28px auto;padding:0 18px}
-    h1{margin:0 0 6px;font-size:30px;letter-spacing:-.02em}
-    .sub{margin:0 0 14px;color:var(--muted)}
-
-    /* Fixed columns: left 360px, right fills. Prevent growth from content. */
-    .grid{
-      display:grid;
-      grid-template-columns: 360px minmax(0,1fr);
-      gap:20px;
-      align-items:start;
-    }
-    @media (max-width:980px){
-      .grid{grid-template-columns:1fr}
-      :root{ --panelH:auto; }
-    }
-
-    .card{
-      background:var(--paper);border:1px solid var(--border);
-      border-radius:var(--radius);box-shadow:var(--shadow);
-      min-width:0; /* allow item to shrink within grid track */
-    }
-    .panel{
-      height:var(--panelH);display:flex;flex-direction:column;
-      min-width:0; /* prevent long code from expanding the column */
-    }
-    .pad{padding:16px}
-    .grow{flex:1 1 auto;min-height:0}
-
-    /* Inputs, buttons */
-    label{display:block;font-weight:700;color:var(--muted);margin:10px 0 6px}
-    input[type="text"]{
-      width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--border);background:#fff;outline:none
-    }
-    input[type="text"]:focus{box-shadow:0 0 0 3px rgba(14,165,233,.18); border-color:#bfe6fb}
-    .btn{appearance:none;border:1px solid var(--border);background:#fff;color:var(--ink);
-      padding:10px 14px;border-radius:10px;font-weight:700;cursor:pointer}
-    .btn.primary{background:var(--accent);color:var(--accent-ink);border-color:transparent}
-    .btn.small{padding:8px 10px;font-size:13px}
-    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
-
-    /* Select image box fills the whole left panel area */
-    .drop{
-      position:relative;height:100%;border:2px dashed var(--dash);border-radius:12px;color:var(--muted);
-      background:#fff;display:grid;place-items:center;padding:14px;overflow:hidden;
-      transition:border-color .2s, background .2s;
-    }
-    .drop.drag{border-color:var(--accent);background:#f0fbff}
-    .drop .empty{text-align:center}
-    .drop .empty .row{justify-content:center;margin-top:8px}
-    .drop .hint{margin-top:6px;font-size:13px;color:var(--muted)}
-
-    /* Image inside the box */
-    #preview{display:none;max-width:100%;max-height:100%;object-fit:contain;border-radius:10px}
-    .drop.has-image #preview{display:block}
-    .drop.has-image .empty{display:none}
-
-    /* Hover overlay ONLY when image is selected */
-    .overlay{
-      position:absolute;inset:0;display:grid;place-items:center;background:rgba(2,6,23,.45);
-      opacity:0;pointer-events:none;transition:opacity .15s ease;border-radius:inherit;z-index:2;
-    }
-    .drop.has-image:hover .overlay,
-    .drop.has-image:focus-within .overlay{opacity:1;pointer-events:auto}
-    .overlay .btn{box-shadow:0 2px 10px rgba(0,0,0,.2)}
-    .overlay .btn.primary{background:#0ea5e9;color:#06222c;border-color:transparent}
-
-    /* Right: code & errors — never expand grid width */
-    .bar{display:flex;align-items:center;justify-content:space-between;margin:6px 0}
-    .bar .label{color:var(--muted);font-size:13px}
-    pre.code{
-      background:#0a0c10;color:#e5e7eb;font:13px/1.45 ui-monospace, Menlo, Consolas, monospace;
-      border-radius:10px;border:1px solid #1f2937;padding:12px;
-      overflow:auto;                 /* scroll instead of resize */
-      overflow-x:auto;               /* horizontal scroll for long lines */
-      white-space:pre;               /* keep CSS formatting */
-      max-width:100%;                /* don't overflow grid track */
-      contain: content;              /* isolate layout/paint */
-    }
-    #output{flex:1 1 auto;min-height:180px}
-    #errors{height:120px;border-color:rgba(239,68,68,.35); color:#ffe1e1; background:#2a0b0b}
-
-    .hint{color:var(--muted);font-size:13px}
-    .pill{display:inline-block;padding:3px 8px;border-radius:999px;border:1px solid var(--border);background:#fff;font-size:12px}
-    .ok{color:var(--ok)} .err{color:var(--err)}
-  </style>
+  <title>Image → CSS</title>
+  <link rel="stylesheet" href="style.css"/>
 </head>
-<body>
-  <div class="wrap">
+<body class="is-app">
+  <div class="container" style="padding-top:24px;padding-bottom:24px">
     <h1>Image → CSS</h1>
-    <p class="sub">Upload/paste a <b>cropped screenshot of one component</b> (button, card, input). We’ll generate scoped CSS with GPT-5.</p>
+    <p class="lead">Upload/paste a <b>cropped screenshot of one component</b> (button, card, input). We’ll generate scoped CSS with GPT-5.</p>
 
-    <div class="grid">
-      <!-- LEFT: fixed-height, fixed-width panel -->
-      <section class="card panel pad">
-        <div class="grow">
-          <div class="drop" id="drop" tabindex="0" aria-label="Drop or choose an image">
-            <div id="emptyUi" class="empty">
+    <div class="app-grid">
+      <!-- LEFT: fixed-height panel -->
+      <section class="card app-panel pad">
+        <div class="snip-frame drop" id="drop" tabindex="0" aria-label="Drop or choose an image">
+          <!-- Empty state -->
+          <div class="drop-inner" id="emptyUi">
+            <div>
               <div><b>Drop an image</b>, click <em>Choose</em>, or paste (Ctrl/Cmd+V).</div>
-              <div class="row">
+              <div class="btn-row" style="margin-top:8px">
                 <button id="chooseBtn" class="btn small">Choose</button>
                 <button id="pasteBtn" class="btn small">Paste</button>
               </div>
               <div class="hint" id="sizeHint">No image selected</div>
             </div>
-            <img id="preview" alt="Selected image preview"/>
-            <div class="overlay" id="overlay"><button id="changeBtn" class="btn primary">Change photo</button></div>
-            <input id="file" type="file" accept="image/*" hidden>
+          </div>
+
+          <!-- Image lives inside the frame -->
+          <img id="preview" class="preview-img" alt="Selected image preview"/>
+
+          <!-- Hover overlay (only when image selected) -->
+          <div class="overlay" id="overlay">
+            <button id="changeBtn" class="btn accent">Change photo</button>
+          </div>
+
+          <!-- hidden input -->
+          <input id="file" type="file" accept="image/*" hidden>
+        </div>
+
+        <div class="grid-3" style="gap:12px; margin-top:14px">
+          <div>
+            <div class="lead" style="font-size:13px;margin:0 0 6px;color:var(--muted);font-weight:700">Scope class</div>
+            <input id="scope" type="text" class="input" value=".comp" placeholder=".comp" style="width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--border)"/>
+          </div>
+          <div>
+            <div class="lead" style="font-size:13px;margin:0 0 6px;color:var(--muted);font-weight:700">Component hint</div>
+            <input id="component" type="text" class="input" value="button" placeholder="button, card, input, …" style="width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--border)"/>
+          </div>
+          <div>
+            <div class="lead" style="font-size:13px;margin:0 0 6px;color:var(--muted);font-weight:700">Optional palette tokens (comma-separated)</div>
+            <input id="palette" type="text" class="input" placeholder="--blue: #3b82f6, --radius: 12px" style="width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--border)"/>
           </div>
         </div>
 
-        <div class="row" style="margin-top:12px">
-          <div style="flex:1 1 220px">
-            <label for="scope">Scope class</label>
-            <input id="scope" type="text" value=".comp" placeholder=".comp">
-          </div>
-          <div style="flex:1 1 220px">
-            <label for="component">Component hint</label>
-            <input id="component" type="text" value="button" placeholder="button, card, input, …">
-          </div>
-          <div style="flex:1 1 100%">
-            <label for="palette">Optional palette tokens (comma-separated)</label>
-            <input id="palette" type="text" placeholder="--blue: #3b82f6, --radius: 12px">
-          </div>
-        </div>
-
-        <div class="row" style="margin-top:12px">
+        <div style="display:flex; align-items:center; gap:10px; margin-top:12px">
           <button id="runBtn" class="btn primary">Generate CSS</button>
           <button id="clearBtn" class="btn">Clear</button>
-          <span class="hint" id="statusLead"></span>
-          <span class="pill">API: <b id="apiStatus">—</b></span>
+          <span class="lead" id="statusLead" style="margin-left:auto;font-size:13px;color:var(--muted)"></span>
+          <span class="kicker" style="margin-left:8px">API: <b id="apiStatus">—</b></span>
         </div>
       </section>
 
       <!-- RIGHT: fixed-height panel with internal scrolling -->
-      <section class="card panel pad">
-        <div class="bar">
+      <section class="card app-panel pad">
+        <div class="outputbar">
           <span class="label">Final CSS</span>
           <button id="copyFinalBtn" class="btn small">Copy</button>
         </div>
         <pre id="output" class="code" aria-label="Final CSS"></pre>
 
-        <div class="bar"><span class="label">API response / errors</span></div>
+        <div class="outputbar" style="margin-top:8px">
+          <span class="label">API response / errors</span>
+        </div>
         <pre id="errors" class="code" aria-label="Errors"></pre>
       </section>
+    </div>
+  </div>
+
+  <!-- Global loading overlay -->
+  <div id="loading" class="loading-scrim" aria-hidden="true">
+    <div class="loading-card" role="status" aria-live="polite" aria-atomic="true">
+      <span class="spinner" aria-hidden="true"></span>
+      <div>
+        <div class="loading-title">Generating CSS…</div>
+        <div class="loading-sub">This usually takes a few seconds.</div>
+      </div>
     </div>
   </div>
 
@@ -183,13 +112,21 @@
     const errorsEl = document.getElementById('errors');
     const copyFinalBtn = document.getElementById('copyFinalBtn');
 
+    const loading = document.getElementById('loading');
+
     let dataUrl = "";
+
+    // ----- Loading overlay -----
+    function setLoading(on){
+      loading.classList.toggle('open', !!on);
+      loading.setAttribute('aria-hidden', on ? 'false' : 'true');
+    }
 
     // ----- DnD / Choose / Paste -----
     chooseBtn.addEventListener('click', () => fileEl.click());
-    changeBtn.addEventListener('click', () => fileEl.click()); // overlay action
+    changeBtn.addEventListener('click', () => fileEl.click());
 
-    // Click anywhere on the box when empty → open file dialog
+    // Click anywhere on the frame when empty → open file dialog
     dropEl.addEventListener('click', (e) => {
       if (!dropEl.classList.contains('has-image') && e.target === dropEl) fileEl.click();
     });
@@ -216,7 +153,6 @@
       if (it) readFile(it.getAsFile());
     });
 
-    // Keyboard: Enter/Space on empty drop opens file dialog
     dropEl.addEventListener('keydown', (e)=>{
       if (!dropEl.classList.contains('has-image') && (e.key === 'Enter' || e.key === ' ')) {
         e.preventDefault(); fileEl.click();
@@ -236,7 +172,9 @@
     }
 
     function clearImage(){
-      dataUrl = ""; preview.src = ""; dropEl.classList.remove('has-image');
+      dataUrl = "";
+      preview.src = "";
+      dropEl.classList.remove('has-image');
       sizeHint.textContent = "No image selected";
     }
 
@@ -251,7 +189,7 @@
         body: JSON.stringify({ image, palette, scope, component }),
       });
 
-      const text = await r.text(); // raw
+      const text = await r.text();
       let json = null;
       try { json = JSON.parse(text); } catch {}
 
@@ -264,27 +202,29 @@
       return json ?? { error: "Malformed JSON from server", raw: text };
     }
 
-    function fmt(x) {
-      if (typeof x === "string") return x;
-      try { return JSON.stringify(x, null, 2); } catch { return String(x); }
-    }
+    function fmt(x) { if (typeof x === "string") return x; try { return JSON.stringify(x, null, 2); } catch { return String(x); } }
 
     // ----- Actions -----
     runBtn.addEventListener('click', onRun);
     clearBtn.addEventListener('click', () => { clearOutputs(); clearImage(); });
-    copyFinalBtn.addEventListener('click', async ()=> { if (!outputEl.textContent) return; try { await navigator.clipboard.writeText(outputEl.textContent); copyFlash(copyFinalBtn); } catch {} });
+    copyFinalBtn.addEventListener('click', async ()=> {
+      if (!outputEl.textContent) return;
+      try { await navigator.clipboard.writeText(outputEl.textContent); copyFlash(copyFinalBtn); } catch {}
+    });
 
     async function onRun(){
       clearOutputs();
       if (!dataUrl || !dataUrl.startsWith('data:image')) {
         errorsEl.textContent = "Pick or paste an image first (cropped to a single component).";
-        apiStatus.textContent = "400"; apiStatus.classList.add('err'); return;
+        apiStatus.textContent = "400"; apiStatus.style.color = "#ef4444"; return;
       }
       const pal = paletteEl.value ? paletteEl.value.split(",").map(s => s.trim()).filter(Boolean) : [];
 
       try {
         runBtn.disabled = true;
-        statusLead.textContent = "Generating…"; apiStatus.textContent = "…"; apiStatus.classList.remove('err','ok');
+        setLoading(true);
+        statusLead.textContent = "Generating…";
+        apiStatus.textContent = "…"; apiStatus.style.color = "";
 
         const res = await generateCSS({
           image: dataUrl,
@@ -293,18 +233,17 @@
           component: componentEl.value || "component"
         });
 
-        apiStatus.textContent = "200 OK"; apiStatus.classList.add('ok');
+        apiStatus.textContent = "200 OK"; apiStatus.style.color = "#16a34a";
         statusLead.textContent = `Done (${res.passes} passes)`;
-
         outputEl.textContent = res.css || "";
 
         if (!res.css || !res.css.trim()) {
           errorsEl.textContent = `Model raw_out (first 2k):\n` + String(res.raw_out || "").slice(0, 2000);
         } else {
-          errorsEl.textContent = ""; // clear
+          errorsEl.textContent = "";
         }
       } catch (err) {
-        apiStatus.textContent = String(err.status || 500); apiStatus.classList.add('err');
+        apiStatus.textContent = String(err.status || 500); apiStatus.style.color = "#ef4444";
         statusLead.textContent = "Error";
         const dump = [
           `Status: ${err.status ?? 'unknown'}`,
@@ -314,13 +253,14 @@
         errorsEl.textContent = dump;
         console.error("API error dump:", err);
       } finally {
+        setLoading(false);
         runBtn.disabled = false;
       }
     }
 
     function clearOutputs(){
       outputEl.textContent = ""; errorsEl.textContent = "";
-      apiStatus.textContent = "—"; apiStatus.classList.remove('ok','err'); statusLead.textContent = "";
+      apiStatus.textContent = "—"; apiStatus.style.color = ""; statusLead.textContent = "";
     }
     function copyFlash(btn){ const prev=btn.textContent; btn.textContent="Copied!"; setTimeout(()=>btn.textContent=prev, 900); }
   </script>
