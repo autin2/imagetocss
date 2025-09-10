@@ -1,13 +1,12 @@
 // /api/generate-css.js
 // Single-pass CSS generator for ONE component from an image (Responses API).
+// Fixes: strips START/END markers before scoping; robust extraction; local sanitize.
 // Returns: { draft, css, versions, passes, palette, notes, scope, component }
 
 import OpenAI from "openai";
 
-// Default model (override with OPENAI_MODEL env if you want, e.g., "gpt-5-mini")
 const MODEL = process.env.OPENAI_MODEL || "gpt-5";
 
-// Next.js Pages API: we read the body stream ourselves
 export const config = { api: { bodyParser: false } };
 
 export default async function handler(req, res) {
@@ -35,7 +34,7 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: "OPENAI_API_KEY not configured" });
     }
 
-    // Size guard (keep uploads modest for speed)
+    // Size guard
     const approxBytes = Buffer.byteLength(image, "utf8");
     if (approxBytes > 4.5 * 1024 * 1024) {
       return res.status(413).json({ error: "Image too large. Keep under ~4MB." });
@@ -43,14 +42,21 @@ export default async function handler(req, res) {
 
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-    // ---------- SINGLE PASS ----------
-    const cssRaw = await passSingle(client, { image, palette, scope, component });
+    // ----- SINGLE PASS -----
+    const raw = await passSingle(client, { image, palette, scope, component });
 
-    // Scope guard + light local "completion" if braces are clearly cut off
-    let css = enforceScope(cssRaw, scope);
-    css = closeObviousTruncation(css);
+    // 1) Extract inside markers (robust), or code fence, or raw
+    let css = extractCss(raw);
 
-    // Shape matches your UI (draft == css; versions has only v0)
+    // 2) Strip any stray markers/comments (defensive)
+    css = stripMarkers(css);
+
+    // 3) Scope after markers are gone (prevents `.comp /*START_CSS*/` issue)
+    css = enforceScope(css, scope);
+
+    // 4) Sanitize: close braces & trim dangling property if cut mid-line
+    css = sanitize(css);
+
     res.setHeader("Cache-Control", "no-store");
     return res.status(200).json({
       draft: css,
@@ -64,9 +70,7 @@ export default async function handler(req, res) {
     });
   } catch (err) {
     const status =
-      err?.status ||
-      err?.statusCode ||
-      err?.response?.status ||
+      err?.status || err?.statusCode || err?.response?.status ||
       (String(err?.message || "").includes("JSON body") ? 400 : 500);
 
     const toStr = (x) => {
@@ -94,11 +98,29 @@ async function readJson(req) {
   try { return JSON.parse(raw); } catch { throw new Error("Invalid JSON in request body."); }
 }
 
-function cssFenceStrip(text = "") {
-  return String(text).replace(/^```(?:css)?\s*/i, "").replace(/```$/i, "").trim();
+// Robust marker extract (handles spaces/case; picks the last END marker if multiple)
+function extractCss(text = "") {
+  const sRe = /\/\*\s*START_CSS\s*\*\//i;
+  const eRe = /\/\*\s*END_CSS\s*\*\//ig;
+  const s = sRe.exec(text);
+  let e = null, m;
+  while ((m = eRe.exec(text))) e = m; // last END
+  if (s && e && e.index > s.index) {
+    return text.slice(s.index + s[0].length, e.index).trim();
+  }
+  // Fallback: ```css ... ```
+  const fence = /```css([\s\S]*?)```/i.exec(text);
+  if (fence) return fence[1].trim();
+  // Last resort: return the whole thing but trimmed
+  return String(text).trim();
 }
 
-/** Prefix all non-@ rules (except :root) with the scope class. */
+// Remove any lingering START/END markers defensively
+function stripMarkers(s = "") {
+  return s.replace(/\/\*\s*START_CSS\s*\*\/|\/\*\s*END_CSS\s*\*\//gi, "").trim();
+}
+
+/** Scope all non-@top-level selectors (except :root) under the scope class. */
 function enforceScope(inputCss = "", scope = ".comp") {
   let css = String(inputCss || "").trim();
   css = css.replace(/(^|})\s*([^@}{]+?)\s*\{/g, (m, p1, selectors) => {
@@ -106,27 +128,32 @@ function enforceScope(inputCss = "", scope = ".comp") {
       .split(",")
       .map((s) => s.trim())
       .map((sel) => (!sel || sel.startsWith(scope) || sel.startsWith(":root")) ? sel : `${scope} ${sel}`)
+      .filter(Boolean)
       .join(", ");
     return `${p1} ${scoped} {`;
   });
   return css.trim();
 }
 
-/** If the model stopped in the middle of a block, add closing braces locally (no extra API call). */
-function closeObviousTruncation(css) {
+// If model cuts off: close unmatched braces and drop one dangling declaration if needed
+function sanitize(css = "") {
   let out = String(css || "").trim();
   if (!out) return out;
 
-  // If it doesn't end with "}" but looks like rules exist, close until counts match
+  // If last declaration is cut (has ":" but no ";" before line end), drop it
+  out = out.replace(/([^\n{};]+:[^\n;{}]*)\s*$/m, (m) => {
+    // If it already ends with ; or }, keep it
+    return /[;}]$/.test(m) ? m : "";
+  }).trim();
+
+  // Close unmatched braces
   const opens = (out.match(/{/g) || []).length;
   let closes = (out.match(/}/g) || []).length;
+  while (closes < opens) { out += "\n}"; closes++; }
 
-  while (closes < opens) {
-    out += "\n}";
-    closes++;
-  }
-  // Avoid dangling comma/colon at the very end
+  // Remove dangling comma/colon at very end
   out = out.replace(/[,:]\s*$/, "").trim();
+
   return out;
 }
 
@@ -148,12 +175,6 @@ function extractText(r) {
   return chunks.join("");
 }
 
-function between(text, a, b) {
-  const i = text.indexOf(a); if (i === -1) return null;
-  const j = text.indexOf(b, i + a.length); if (j === -1) return null;
-  return text.slice(i + a.length, j);
-}
-
 /* ================= single pass ================= */
 
 async function passSingle(client, { image, palette, scope, component }) {
@@ -165,15 +186,17 @@ async function passSingle(client, { image, palette, scope, component }) {
     "(1) All selectors MUST be under the provided SCOPE CLASS; " +
     "(2) No global resets/layout/headers/footers; " +
     "(3) Keep CSS minimal, faithful, and practical; " +
-    "Return the CSS wrapped EXACTLY between /*START_CSS*/ and /*END_CSS*/.";
+    "OUTPUT FORMAT: first line EXACTLY '/*START_CSS*/', last line EXACTLY '/*END_CSS*/'. " +
+    "No other content on those lines.";
 
   const usr = [
     `SCOPE CLASS: ${scope}`,
     `COMPONENT TYPE (hint): ${component}`,
     "Study the SINGLE component in the image and output CSS for that component only.",
-    "No body/html/universal selectors. Use the scope for every selector.",
+    "Prefer selectors like `.comp button`, `.comp .btn`, `.comp .card`, etc., not bare `.comp{}` unless it's truly the root.",
+    "No body/html/universal selectors.",
     palette?.length ? `Optional palette tokens (only if they match): ${palette.join(", ")}` : "No palette tokens required.",
-    "Return CSS ONLY, between the markers.",
+    "Return CSS ONLY, wrapped between the required markers.",
   ].join("\n");
 
   const r = await client.responses.create({
@@ -191,7 +214,5 @@ async function passSingle(client, { image, palette, scope, component }) {
     ],
   });
 
-  const raw = extractText(r) || "";
-  const boxed = between(raw, "/*START_CSS*/", "/*END_CSS*/");
-  return (boxed ? boxed : cssFenceStrip(raw)).trim();
+  return extractText(r) || "";
 }
