@@ -137,8 +137,8 @@ async function passDraft(client, { image, palette, scope, component }) {
 
   const r = await client.chat.completions.create({
     model: MODEL,
-    temperature: 0.15,
-    max_completion_tokens: 1400, // GPT-5 expects this
+    // temperature removed (model only supports default)
+    max_completion_tokens: 1400,
     messages: [
       { role: "system", content: sys },
       { role: "user", content: [
@@ -169,7 +169,7 @@ async function passCritique(client, { image, css, palette, scope, component, cyc
 
   const r = await client.chat.completions.create({
     model: MODEL,
-    temperature: 0.05,
+    // temperature removed
     max_completion_tokens: 900,
     messages: [
       { role: "system", content: sys },
@@ -204,7 +204,7 @@ async function passFix(client, { image, css, critique, palette, scope, component
 
   const r = await client.chat.completions.create({
     model: MODEL,
-    temperature: 0.1,
+    // temperature removed
     max_completion_tokens: 1600,
     messages: [
       { role: "system", content: sys },
