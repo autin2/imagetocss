@@ -13,7 +13,7 @@
     }
     *{box-sizing:border-box}
     body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,Arial}
-    .wrap{max-width:1120px;margin:26px auto;padding:0 18px}
+    .wrap{max-width:1000px;margin:28px auto;padding:0 18px}
     h1{margin:0 0 6px;font-size:30px;letter-spacing:-.02em}
     .sub{margin:0 0 14px;color:var(--muted)}
     .grid{display:grid;grid-template-columns:1.05fr .95fr;gap:20px}
@@ -34,7 +34,7 @@
     .btn.small{padding:8px 10px;font-size:13px}
     .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
 
-    /* Drop zone + preview */
+    /* Drop + preview */
     .drop{border:2px dashed var(--border);background:#fff;border-radius:12px;padding:14px;text-align:center;color:var(--muted)}
     .drop.drag{border-color:var(--accent);background:#f0fbff}
     #preview{display:none;margin-top:10px;max-width:100%;max-height:380px;border:1px solid var(--border);border-radius:10px}
@@ -59,7 +59,7 @@
     <p class="sub">Upload/paste a <b>cropped screenshot of one component</b> (button, card, input). We’ll generate scoped CSS with GPT-5 and refine it via critique→fix loops.</p>
 
     <div class="grid">
-      <!-- LEFT: inputs -->
+      <!-- LEFT -->
       <section class="card pad">
         <div class="drop" id="drop">
           <div><b>Drop an image</b>, click <em>Choose</em>, or paste (Ctrl/Cmd+V).</div>
@@ -99,7 +99,7 @@
         </div>
       </section>
 
-      <!-- RIGHT: output -->
+      <!-- RIGHT -->
       <section class="card pad">
         <div class="bar">
           <span class="label">Final CSS</span>
@@ -194,19 +194,33 @@
     function formatBytes(n){ if (!n && n!==0) return "0 KB"; const u=['B','KB','MB','GB']; let i=0; while(n>=1024 && i<u.length-1){n/=1024;i++} return `${n.toFixed(i?1:0)} ${u[i]}`; }
     function flash(msg){ sizeHint.textContent = msg; setTimeout(()=> sizeHint.textContent = sizeHint.textContent || msg, 1400); }
 
-    // ----- API helper -----
+    // ----- API helper (safe text → JSON) -----
     async function generateCSS({ image, palette = [], scope = ".comp", component = "button", double_checks = 4 }) {
       const r = await fetch("/api/generate-css", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ image, palette, scope, component, double_checks }),
       });
+
+      const text = await r.text(); // read raw
+      let json = null;
+      try { json = JSON.parse(text); } catch {}
+
       if (!r.ok) {
-        let payload = null; try { payload = await r.json(); } catch {}
-        const msg = payload?.error || `HTTP ${r.status}`;
-        const err = new Error(msg); err.status = r.status; err.payload = payload; throw err;
+        const err = new Error(
+          (json && (json.error || json.message)) || text || `HTTP ${r.status}`
+        );
+        err.status = r.status;
+        err.payload = json ?? text;
+        throw err;
       }
-      return r.json();
+
+      return json ?? { error: "Malformed JSON from server", raw: text };
+    }
+
+    function fmt(x) {
+      if (typeof x === "string") return x;
+      try { return JSON.stringify(x, null, 2); } catch { return String(x); }
     }
 
     // ----- Actions -----
@@ -222,6 +236,7 @@
         apiStatus.textContent = "400"; apiStatus.classList.add('err'); return;
       }
       const pal = paletteEl.value ? paletteEl.value.split(",").map(s => s.trim()).filter(Boolean) : [];
+
       try {
         runBtn.disabled = true;
         statusLead.textContent = "Generating…"; apiStatus.textContent = "…"; apiStatus.classList.remove('err','ok');
@@ -244,11 +259,13 @@
       } catch (err) {
         apiStatus.textContent = String(err.status || 500); apiStatus.classList.add('err');
         statusLead.textContent = "Error";
-        errorsEl.textContent = [
-          `Message: ${err.message || "(unknown)"}`,
-          err.payload?.error ? `Error: ${err.payload.error}` : "",
-          err.payload?.details ? `Details: ${safeString(err.payload.details)}` : "",
+        const dump = [
+          `Status: ${err.status ?? 'unknown'}`,
+          `Message: ${fmt(err.message)}`,
+          err.payload !== undefined ? `Payload:\n${fmt(err.payload)}` : ""
         ].filter(Boolean).join("\n");
+        errorsEl.textContent = dump;
+        console.error("API error dump:", err);
       } finally {
         runBtn.disabled = false;
       }
@@ -262,7 +279,6 @@
       clearOutputs(); dataUrl=""; preview.src=""; preview.style.display="none";
       sizeHint.textContent="No image selected"; scopeEl.value=".comp"; componentEl.value="button"; checksEl.value=4; paletteEl.value="";
     }
-    function safeString(x){ try { return JSON.stringify(x, null, 2); } catch { return String(x); } }
     function copyFlash(btn){ const prev=btn.textContent; btn.textContent="Copied!"; setTimeout(()=>btn.textContent=prev, 900); }
   </script>
 </body>
