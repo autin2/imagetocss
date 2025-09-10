@@ -7,7 +7,6 @@
   <title>URL Inspector — pick elements</title>
   <link rel="stylesheet" href="style.css"/>
   <style>
-    /* (Same pretty UI as before, trimmed here for brevity – unchanged styles) */
     :root{
       --bg:#f7f9fc; --ink:#0f172a; --muted:#64748b; --border:#e6e9f2; --primary:#2563eb; --primary-700:#1d4ed8;
       --success:#22c55e; --surface:#fff; --code-bg:#0b1020; --code-fg:#e2e8f0; --shadow:0 8px 24px rgba(2,6,23,.06); --radius:14px;
@@ -56,6 +55,8 @@
     .code{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background:var(--code-bg); color:var(--code-fg);
       padding:12px; border-radius:10px; border:1px solid rgba(148,163,184,.25); overflow:auto; box-shadow:inset 0 0 0 1px rgba(255,255,255,.05); }
   </style>
+  <!-- Modest CSP for the inspector shell (proxy content is separate) -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src * data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-src 'self'; connect-src 'self' https:; base-uri 'self'; form-action 'none'">
 </head>
 <body>
   <div class="container">
@@ -97,9 +98,11 @@
           <div class="status"><span id="dot" class="dot"></span><span id="status">Idle</span></div>
         </div>
         <div class="snip">
+          <!-- Drop allow-same-origin to avoid origin-escape; also no popups-to-escape-sandbox -->
           <iframe id="view"
             title="Website preview"
-            sandbox="allow-scripts allow-forms allow-pointer-lock allow-popups allow-popups-to-escape-sandbox allow-modals allow-same-origin"></iframe>
+            sandbox="allow-scripts allow-forms allow-pointer-lock allow-popups allow-modals"
+            referrerpolicy="no-referrer"></iframe>
         </div>
       </section>
 
@@ -170,6 +173,7 @@
       picking = !picking;
       pickBtn.classList.toggle('active', picking);
       if (view.contentWindow) {
+        // We can't restrict targetOrigin because sandboxed iframes without same-origin post "null"
         view.contentWindow.postMessage({ type: 'toggle-picker', picking }, '*');
       }
     });
@@ -184,22 +188,25 @@
       } catch {}
     });
 
-    // Iframe events
+    // Iframe lifecycle
     view.addEventListener('load', () => { status('Booting…', false); });
 
-    // Messages from picker
+    // Messages from picker (accept only from our iframe window)
     window.addEventListener('message', (e) => {
-      const { type, payload } = e.data || {};
+      if (e.source !== view.contentWindow) return; // guard
+      const data = e.data || {};
+      const { type, payload } = data;
+
       if (type === 'picker-ready') {
         status('Ready', true);
-        if (picking) view.contentWindow.postMessage({ type:'toggle-picker', picking:true }, '*');
+        if (picking && view.contentWindow) view.contentWindow.postMessage({ type:'toggle-picker', picking:true }, '*');
       } else if (type === 'hover') {
-        status(\`Hover: \${payload.tag}\`, false);
+        status(\`Hover: \${payload && payload.tag ? payload.tag : 'element'}\`, false);
       } else if (type === 'select') {
-        const { tag, id, classes, rect, selectorMin, selectorPretty, selectorPath, cssBlock } = payload;
+        const { tag, id, classes, rect, selectorMin, selectorPretty, selectorPath, cssBlock } = payload || {};
         tagEl.textContent = tag || '–';
         idEl.textContent = id || '–';
-        classesEl.textContent = classes && classes.length ? classes.join('.') : '–';
+        classesEl.textContent = (classes && classes.length) ? classes.join(' ') : '–';
         sizeEl.textContent = rect ? \`\${Math.round(rect.width)}×\${Math.round(rect.height)}\` : '–';
 
         selectorCleanEl.textContent = selectorPretty || selectorMin || '–';
