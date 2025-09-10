@@ -4,89 +4,210 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>URL Inspector — pick elements from any page</title>
+  <title>URL Inspector — pick elements</title>
   <link rel="stylesheet" href="style.css"/>
   <style>
+    /* ===== Theme ===== */
     :root{
-      --ink:#0f172a; --muted:#64748b; --accent:#22c55e; --border:#e5e7eb; --paper:#ffffff;
+      --bg: #f7f9fc;
+      --ink: #0f172a;
+      --muted: #64748b;
+      --border: #e6e9f2;
+      --ring: #94a3b8;
+      --primary: #2563eb;        /* indigo-600 */
+      --primary-700: #1d4ed8;
+      --success: #22c55e;        /* green-500 */
+      --surface: #ffffff;
+      --code-bg: #0b1020;
+      --code-fg: #e2e8f0;
+      --shadow: 0 8px 24px rgba(2, 6, 23, 0.06);
+      --radius: 14px;
     }
-    body{ margin:0; font:14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; color:var(--ink); background:#f8fafc; }
-    .container{ max-width:1100px; margin:24px auto; padding:0 16px; }
-    .toolbar{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:12px; }
-    .input{ padding:10px 12px; border:1px solid var(--border); border-radius:10px; width:480px; max-width:100%; }
-    .btn{ display:inline-flex; align-items:center; gap:8px; padding:10px 14px; border:1px solid var(--border); background:#fff; border-radius:10px; cursor:pointer; font-weight:600; }
-    .btn.primary{ background:#2563eb; color:#fff; border-color:#2563eb; }
-    .btn.ghost{ background:#fff; }
-    .btn.active{ outline:2px solid var(--accent); }
-    .row{ display:grid; grid-template-columns: 1fr 320px; gap:14px; }
-    @media (max-width: 980px){ .row{ grid-template-columns: 1fr; } }
 
-    /* Snipping frame */
-    .snip-frame{ position:relative; background:#fff; border:1px dashed var(--border); border-radius:12px; overflow:hidden; }
-    .snip-frame::before, .snip-frame::after{
-      content:""; position:absolute; inset:0; pointer-events:none;
+    /* ===== Base ===== */
+    html,body{height:100%}
+    body{
+      margin:0;
+      font:14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      color:var(--ink);
       background:
-        linear-gradient(90deg, transparent 12px, #94a3b8 12px, #94a3b8 14px, transparent 14px) top left,
-        linear-gradient(0deg, transparent 12px, #94a3b8 12px, #94a3b8 14px, transparent 14px) top left,
-        linear-gradient(90deg, transparent 12px, #94a3b8 12px, #94a3b8 14px, transparent 14px) bottom right,
-        linear-gradient(0deg, transparent 12px, #94a3b8 12px, #94a3b8 14px, transparent 14px) bottom right;
-      background-size: 16px 16px, 16px 16px, 16px 16px, 16px 16px;
-      background-repeat:no-repeat;
-      border-radius:12px;
+        radial-gradient(1200px 600px at 10% -10%, #eef2ff 0%, rgba(238,242,255,0) 60%),
+        radial-gradient(1000px 500px at 100% 0%, #e0f2fe 0%, rgba(224,242,254,0) 55%),
+        var(--bg);
+    }
+    .container{ max-width:1200px; margin:28px auto; padding:0 18px; }
+
+    /* ===== Header ===== */
+    .headline{
+      display:flex; align-items:flex-end; gap:14px; margin-bottom:6px;
+    }
+    .headline h1{ margin:0; font-size:32px; letter-spacing:-0.02em; }
+    .headline .beta{ font-size:12px; padding:3px 8px; border-radius:999px; background:#e0e7ff; color:#312e81; font-weight:700; }
+
+    .sub{ color:var(--muted); margin:0 0 18px; }
+
+    /* ===== Controls ===== */
+    .toolbar{
+      display:flex; gap:10px; flex-wrap:wrap; align-items:center;
+      background:var(--surface); border:1px solid var(--border); box-shadow:var(--shadow);
+      padding:12px; border-radius:var(--radius); margin-bottom:16px;
     }
 
+    .field{
+      position:relative; display:flex; align-items:center; flex:1 1 520px; min-width:240px;
+    }
+    .field svg{ position:absolute; left:12px; width:18px; height:18px; color:var(--muted); }
+    .input{
+      width:100%; padding:11px 12px 11px 36px;
+      border:1px solid var(--border); border-radius:12px; background:#fff;
+      outline:none;
+    }
+    .input:focus{ box-shadow:0 0 0 3px rgba(37,99,235,.15); border-color:#c7d2fe; }
+
+    .btn{
+      display:inline-flex; align-items:center; gap:8px; padding:10px 14px;
+      border-radius:12px; border:1px solid var(--border); background:#fff; cursor:pointer;
+      font-weight:700; color:var(--ink);
+      transition:transform .04s ease, box-shadow .2s ease, background .2s;
+    }
+    .btn:hover{ box-shadow:0 4px 14px rgba(2,6,23,.06) }
+    .btn:active{ transform:translateY(1px) }
+    .btn svg{ width:16px; height:16px }
+    .btn.primary{ background:var(--primary); color:#fff; border-color:var(--primary); }
+    .btn.primary:hover{ background:var(--primary-700) }
+    .btn.active{ outline:2px solid var(--success); }
+
+    /* ===== Layout ===== */
+    .grid{
+      display:grid; gap:16px; grid-template-columns: 1fr 360px;
+    }
+    @media (max-width: 1100px){ .grid{ grid-template-columns:1fr; } }
+
+    /* ===== Frame (snipping effect) ===== */
+    .card{
+      background:var(--surface); border:1px solid var(--border);
+      border-radius:var(--radius); box-shadow:var(--shadow);
+      overflow:hidden;
+    }
     .viewer-toolbar{
       display:flex; justify-content:space-between; align-items:center;
-      padding:10px 12px; border-bottom:1px solid var(--border); background:var(--paper);
+      padding:10px 12px; border-bottom:1px solid var(--border); background:linear-gradient(#fff, #fbfdff);
     }
-    .viewer{ position:relative; height:640px; background:#fff; }
-    .viewer iframe{ position:absolute; inset:0; width:100%; height:100%; border:0; background:#fff; }
+    .status{
+      display:inline-flex; align-items:center; gap:8px; color:var(--muted); font-weight:600;
+    }
+    .dot{ width:10px; height:10px; border-radius:999px; background:#cbd5e1; box-shadow:0 0 0 2px #f1f5f9 inset }
+    .dot.ok{ background:var(--success); box-shadow:0 0 0 2px rgba(34,197,94,.25) }
 
-    /* Details side panel */
-    .side{ background:#fff; border:1px solid var(--border); border-radius:12px; }
-    .side .head{ padding:10px 12px; border-bottom:1px solid var(--border); font-weight:700; }
-    .side .body{ padding:10px 12px; }
-    .k{ color:var(--muted); }
-    .code{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background:#0b1020; color:#e2e8f0; padding:10px; border-radius:8px; overflow:auto; }
+    .snip{
+      position:relative; height:680px; background:#fff; overflow:hidden;
+      /* corner snip lines */
+      --c:#9aa6b2;
+      box-shadow: inset 0 0 0 1px var(--border);
+    }
+    .snip::before,
+    .snip::after{
+      content:""; position:absolute; inset:0; pointer-events:none; border-radius:var(--radius);
+      background:
+        linear-gradient(90deg, transparent 12px, var(--c) 12px, var(--c) 14px, transparent 14px) top left,
+        linear-gradient(0deg,  transparent 12px, var(--c) 12px, var(--c) 14px, transparent 14px) top left,
+        linear-gradient(90deg, transparent 12px, var(--c) 12px, var(--c) 14px, transparent 14px) bottom right,
+        linear-gradient(0deg,  transparent 12px, var(--c) 12px, var(--c) 14px, transparent 14px) bottom right;
+      background-size:16px 16px, 16px 16px, 16px 16px, 16px 16px;
+      background-repeat:no-repeat;
+    }
+    .snip iframe{
+      position:absolute; inset:0; width:100%; height:100%; border:0; background:#fff;
+    }
+
+    /* ===== Side panel ===== */
+    .side .head{ padding:12px; border-bottom:1px solid var(--border); font-weight:800; }
+    .side .body{ padding:12px; }
+    .row2{ display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin:8px 0 10px; }
+    .chip{
+      background:#f1f5f9; border:1px solid var(--border); color:#0f172a;
+      padding:6px 10px; border-radius:999px; font-size:12px; font-weight:700; white-space:nowrap;
+    }
+    .kv{ color:var(--muted); font-weight:600; }
+    .code{
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background:var(--code-bg); color:var(--code-fg);
+      padding:12px; border-radius:10px; border:1px solid rgba(148,163,184,.25); min-height:96px;
+      overflow:auto; box-shadow:inset 0 0 0 1px rgba(255,255,255,.05);
+    }
   </style>
 </head>
 <body>
   <div class="container">
-    <h1 style="margin:0 0 8px">URL inspector</h1>
-    <p style="margin:0 0 16px; color:var(--muted)">Enter a URL, render it in the snipping frame, then click <b>Pick elements</b> to highlight & copy selectors.</p>
+    <div class="headline">
+      <h1>URL inspector</h1>
+      <span class="beta">beta</span>
+    </div>
+    <p class="sub">Render a page in the snipping frame, then click <b>Pick elements</b> to highlight & copy selectors.</p>
 
+    <!-- Controls -->
     <div class="toolbar">
-      <input id="url" class="input" type="url" placeholder="https://example.com" spellcheck="false"/>
-      <button id="load" class="btn primary">Load</button>
-      <button id="pick" class="btn ghost" title="Toggle element picker">Pick elements</button>
-      <button id="copy" class="btn ghost" title="Copy last selector">Copy selector</button>
+      <label class="field" for="url">
+        <!-- link icon -->
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M9 12a3 3 0 0 0 3 3h2.5a3.5 3.5 0 0 0 0-7H13"
+                stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M15 12a3 3 0 0 0-3-3H9.5a3.5 3.5 0 0 0 0 7H11"
+                stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <input id="url" class="input" type="url" placeholder="https://example.com" spellcheck="false"/>
+      </label>
+
+      <button id="load" class="btn primary">
+        <!-- play icon -->
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M8 5v14l11-7-11-7Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+        Load
+      </button>
+
+      <button id="pick" class="btn" title="Toggle element picker">
+        <!-- crosshair icon -->
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3v3M12 18v3M21 12h-3M6 12H3M12 8v8M8 12h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        Pick elements
+      </button>
+
+      <button id="copy" class="btn" title="Copy last selector">
+        <!-- copy icon -->
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M9 9h9v9H9z" stroke="currentColor" stroke-width="1.8"/><path d="M6 6h9v9" stroke="currentColor" stroke-width="1.8"/></svg>
+        Copy selector
+      </button>
     </div>
 
-    <div class="row">
-      <!-- Left: snipping-frame + viewer -->
-      <section class="snip-frame">
+    <!-- Main grid -->
+    <div class="grid">
+      <!-- Left: frame -->
+      <section class="card">
         <div class="viewer-toolbar">
-          <div class="k">Rendered page</div>
-          <div id="status" class="k">Idle</div>
+          <div class="kv">Rendered page</div>
+          <div class="status"><span id="dot" class="dot"></span><span id="status">Idle</span></div>
         </div>
-        <div class="viewer">
+        <div class="snip">
           <iframe id="view"
                   title="Website preview"
                   sandbox="allow-scripts allow-forms allow-pointer-lock allow-popups allow-popups-to-escape-sandbox allow-modals allow-same-origin"></iframe>
         </div>
       </section>
 
-      <!-- Right: selection details -->
-      <aside class="side">
+      <!-- Right: details -->
+      <aside class="card side">
         <div class="head">Selection</div>
         <div class="body">
-          <div><span class="k">Tag:</span> <span id="tag">–</span></div>
-          <div><span class="k">ID:</span> <span id="sid">–</span></div>
-          <div><span class="k">Classes:</span> <span id="classes">–</span></div>
-          <div><span class="k">Size:</span> <span id="size">–</span></div>
+          <div class="row2">
+            <div class="chip"><span class="kv">Tag</span>&nbsp;<span id="tag">–</span></div>
+            <div class="chip"><span class="kv">Size</span>&nbsp;<span id="size">–</span></div>
+          </div>
+          <div class="row2">
+            <div class="chip" style="max-width:100%; overflow:hidden; text-overflow:ellipsis;"><span class="kv">ID</span>&nbsp;<span id="sid">–</span></div>
+            <div class="chip" style="max-width:100%; overflow:hidden; text-overflow:ellipsis;"><span class="kv">Classes</span>&nbsp;<span id="classes">–</span></div>
+          </div>
+
           <div style="margin-top:10px">
-            <div class="k" style="margin-bottom:6px">Selector</div>
-            <pre id="selector" class="code" style="min-height:84px">/* click Pick, then click an element */</pre>
+            <div class="kv" style="margin-bottom:6px">Selector</div>
+            <pre id="selector" class="code">/* Click Pick, then click an element */</pre>
           </div>
         </div>
       </aside>
@@ -94,11 +215,13 @@
   </div>
 
   <script>
+    // Elements
     const urlEl = document.getElementById('url');
     const loadBtn = document.getElementById('load');
     const pickBtn = document.getElementById('pick');
     const copyBtn = document.getElementById('copy');
     const statusEl = document.getElementById('status');
+    const dotEl = document.getElementById('dot');
     const view = document.getElementById('view');
 
     const tagEl = document.getElementById('tag');
@@ -110,9 +233,19 @@
     let picking = false;
     let lastSelector = "";
 
+    // Load URL
     loadBtn.addEventListener('click', () => loadUrl(urlEl.value));
     urlEl.addEventListener('keydown', e => { if (e.key === 'Enter') loadUrl(urlEl.value); });
 
+    async function loadUrl(raw){
+      const u = (raw || "").trim();
+      if (!u) { alert("Enter a URL"); return; }
+      status('Loading…', false);
+      const encoded = encodeURIComponent(u);
+      view.src = `/api/proxy?u=${encoded}`;
+    }
+
+    // Toggle picker
     pickBtn.addEventListener('click', () => {
       picking = !picking;
       pickBtn.classList.toggle('active', picking);
@@ -121,41 +254,39 @@
       }
     });
 
+    // Copy selector
     copyBtn.addEventListener('click', async () => {
       if (!lastSelector) return;
       try { await navigator.clipboard.writeText(lastSelector); copyBtn.textContent = 'Copied!'; setTimeout(()=>copyBtn.textContent='Copy selector', 900); }
       catch {}
     });
 
-    async function loadUrl(raw){
-      const u = (raw || "").trim();
-      if (!u) { alert("Enter a URL"); return; }
-      statusEl.textContent = 'Loading…';
-      const encoded = encodeURIComponent(u);
-      // Load through our proxy, which returns HTML (same-origin), so we can inject picker.
-      view.src = `/api/proxy?u=${encoded}`;
-    }
+    // Iframe events
+    view.addEventListener('load', () => { status('Booting…', false); });
 
-    // Receive selection info sent from inside the iframe
+    // PostMessage bridge
     window.addEventListener('message', (e) => {
       const { type, payload } = e.data || {};
       if (type === 'picker-ready') {
-        statusEl.textContent = 'Ready';
+        status('Ready', true);
         if (picking) view.contentWindow.postMessage({ type:'toggle-picker', picking:true }, '*');
       } else if (type === 'hover') {
-        statusEl.textContent = `Hover: ${payload.tag}`;
+        status(`Hover: ${payload.tag}`, false);
       } else if (type === 'select') {
         const { tag, id, classes, rect, selector } = payload;
         tagEl.textContent = tag || '–';
         idEl.textContent = id || '–';
-        classesEl.textContent = classes?.join('.') || '–';
+        classesEl.textContent = classes && classes.length ? classes.join('.') : '–';
         sizeEl.textContent = rect ? `${Math.round(rect.width)}×${Math.round(rect.height)}` : '–';
         selectorEl.textContent = selector || '–';
         lastSelector = selector || '';
       }
     });
 
-    view.addEventListener('load', () => { statusEl.textContent = 'Booting…'; });
+    function status(text, ok){
+      statusEl.textContent = text;
+      dotEl.classList.toggle('ok', !!ok);
+    }
   </script>
 </body>
 </html>
