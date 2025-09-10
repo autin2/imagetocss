@@ -4,6 +4,7 @@
 // Goals
 // - Generate VALID, SCOPED, COMPONENT-ONLY CSS from a single component screenshot
 // - Rock-solid output: markers + extraction + auto-repair (dangling rgba, ,;, braces)
+// - Auto-merge broken multi-line box-shadow/text-shadow declarations
 // - Gradient guardrails + client "force_solid" override
 // - GPT-5 → mini → 4.x fallbacks, model probe with >=16 tokens
 // - Rich error details back to client (no opaque 500s)
@@ -12,13 +13,13 @@
 // POST JSON:
 // {
 //   image: "data:image/...",
-//   scope?: ".comp",                 // scope/root class for the component
+//   scope?: ".comp",
 //   component?: "button" | "card" | "input" | string,
-//   palette?: string[],              // optional tokens (e.g. ["--blue:#3b82f6"])
-//   double_checks?: number,          // critique→fix loops (1..4), default 1 (fast)
-//   force_solid?: boolean,           // client hint: flat background (no gradients)
-//   solid_color?: string,            // suggested hex if flat, e.g. "#3b82f6"
-//   minify?: boolean                 // optional: return minified CSS too
+//   palette?: string[],
+//   double_checks?: number,   // critique→fix loops (1..4), default 1 (fast)
+//   force_solid?: boolean,    // client hint: flat background (no gradients)
+//   solid_color?: string,     // suggested hex if flat, e.g. "#3b82f6"
+//   minify?: boolean          // optional: return minified CSS too
 // }
 //
 // 200 OK Response:
@@ -34,7 +35,7 @@
 //     repairs: string[],
 //     scopeWasSanitized: boolean
 //   },
-//   minified?: string    // if minify=true
+//   minified?: string
 // }
 // -----------------------------------------------------------------------------
 
@@ -236,7 +237,6 @@ function extractCssWithMarkers(s = "") {
 /** Prefix top-level selectors with the scope (except :root and @rules). */
 function enforceScope(inputCss = "", scope = ".comp") {
   let css = inputCss.trim();
-  // do not duplicate if already scoped
   css = css.replace(/(^|})\s*([^@}{]+?)\s*\{/g, (m, p1, selectors) => {
     const scoped = selectors
       .split(",")
@@ -275,27 +275,76 @@ function repairCss(css = "") {
     return `rgba(${num(r)}, ${num(g)}, ${num(b)}, ${num(a)})`;
   });
 
-  // 2) Ensure shadow lines end with semicolons
+  // 2) Ensure shadow lines end with semicolons (before we merge)
   out = out.replace(/(box-shadow|text-shadow)\s*:[^;{}]+(?=\n|$)/gi, (m) => m + ";");
 
-  // 3) Replace ",;" → ";"
-  out = out.replace(/,\s*;/g, ";");
+  // 3) Fix ',;' → ';' and collapse duplicate semicolons
+  out = out.replace(/,\s*;/g, ";").replace(/;;+/g, ";");
 
-  // 4) Balance parentheses & braces
+  // 3b) Remove trailing commas before semicolon in shadow properties
+  out = out.replace(/(box-shadow|text-shadow)\s*:\s*([^;{}]+?),\s*;/gi, (m, prop, vals) => {
+    return `${prop}: ${vals.trim()};`;
+  });
+
+  // 4) Merge multi-line/fragmented shadow values into one comma-separated list
+  out = mergeShadowFragments(out, "box-shadow");
+  out = mergeShadowFragments(out, "text-shadow");
+
+  // 5) Balance parentheses & braces
   out = balanceParens(out);
   out = balanceBraces(out);
 
-  // 5) Ensure declarations end with semicolon before }
+  // 6) Ensure declarations end with semicolon before }
   out = out.replace(/([^;{}\s])\s*}/g, "$1; }");
 
-  // 6) Remove truly empty rule blocks (e.g., ".x:active { }")
+  // 7) Remove truly empty rule blocks (e.g., ".x:active { }")
   out = out.replace(/(^|})\s*([^{]+)\{\s*}\s*/g, "$1");
 
   return out.trim();
 }
-function num(v){ const n=parseFloat(String(v).replace(/[^\d.]/g,"")); return Number.isFinite(n)?n:0; }
-function balanceParens(s=""){ let open=0,res=""; for(const ch of s){ if(ch==="(")open++; if(ch===")")open=Math.max(0,open-1); res+=ch; } while(open-- >0) res+=")"; return res; }
-function balanceBraces(s=""){ const opens=(s.match(/{/g)||[]).length, closes=(s.match(/}/g)||[]).length; let out=s; for(let i=0;i<opens-closes;i++) out+="\n}"; return out; }
+
+/**
+ * Merge broken shadow declarations like:
+ *   box-shadow: <a>; <b>;            -> box-shadow: <a>, <b>;
+ * Works across newlines/spaces; runs repeatedly until stable.
+ */
+function mergeShadowFragments(css = "", prop = "box-shadow") {
+  let out = css;
+  // Pattern: (prop:)( value1 ); ( value2 );
+  // Ensure the second part is NOT starting like a property name (e.g., "color:")
+  const re = new RegExp(`(${prop}\\s*:\\s*)([^;{}]+);\\s*(?![a-z-]+\\s*:)([^;{}]+);`, "gi");
+  let prev;
+  do {
+    prev = out;
+    out = out.replace(re, (_m, head, a, b) => {
+      const left = a.trim().replace(/,\s*$/,"");   // strip trailing comma
+      const right = b.trim().replace(/^,\s*/,"");  // strip leading comma
+      return `${head}${left}, ${right};`;
+    });
+  } while (out !== prev);
+  return out;
+}
+
+function num(v){
+  const n = parseFloat(String(v).replace(/[^\d.]/g, ""));
+  return Number.isFinite(n) ? n : 0;
+}
+function balanceParens(s=""){
+  let open=0, res="";
+  for (const ch of s) {
+    if (ch === "(") open++;
+    if (ch === ")") open = Math.max(0, open - 1);
+    res += ch;
+  }
+  while (open-- > 0) res += ")";
+  return res;
+}
+function balanceBraces(s=""){
+  const opens=(s.match(/{/g)||[]).length, closes=(s.match(/}/g)||[]).length;
+  let out=s;
+  for (let i=0; i<opens-closes; i++) out += "\n}";
+  return out;
+}
 
 /** Very light minifier (keeps readability reasonable) */
 function minifyCss(css="") {
@@ -316,6 +365,14 @@ function diffRepairs(before, after) {
     notes.push("Fixed ',;' punctuation.");
   if (/rgba\(\s*[^)]*$/.test(before) && !/rgba\(\s*[^)]*$/.test(after))
     notes.push("Completed dangling rgba(...).");
+
+  // detect shadow merge
+  const hadBrokenShadow =
+    /(box-shadow|text-shadow)\s*:\s*[^;{}]+;\s*(?![a-z-]+:)[^;{}]+;/.test(before);
+  const hasMergedShadow =
+    /(box-shadow|text-shadow)\s*:\s*[^;{}]+,\s*[^;{}]+;/.test(after);
+  if (hadBrokenShadow && hasMergedShadow) notes.push("Merged fragmented shadow declarations.");
+
   const bOpen=(before.match(/{/g)||[]).length, bClose=(before.match(/}/g)||[]).length;
   const aOpen=(after.match(/{/g)||[]).length, aClose=(after.match(/}/g)||[]).length;
   if (bOpen !== bClose && aOpen === aClose) notes.push("Balanced unmatched braces.");
@@ -417,7 +474,7 @@ async function passDraft(client, model, { image, palette, scope, component, forc
     max_output_tokens: MAX_TOKENS_DRAFT
   });
 
-  // Prefer output_text aggregator; fallback to raw stitching if needed
+  // Prefer output_text; fallback to stitched output if needed
   return r?.output_text ?? stitchOutput(r);
 }
 
