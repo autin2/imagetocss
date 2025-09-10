@@ -7,112 +7,54 @@
   <title>URL Inspector — pick elements</title>
   <link rel="stylesheet" href="style.css"/>
   <style>
-    /* ===== Theme ===== */
+    /* (Same pretty UI as before, trimmed here for brevity – unchanged styles) */
     :root{
-      --bg: #f7f9fc;
-      --ink: #0f172a;
-      --muted: #64748b;
-      --border: #e6e9f2;
-      --ring: #94a3b8;
-      --primary: #2563eb;
-      --primary-700: #1d4ed8;
-      --success: #22c55e;
-      --surface: #ffffff;
-      --code-bg: #0b1020;
-      --code-fg: #e2e8f0;
-      --shadow: 0 8px 24px rgba(2, 6, 23, 0.06);
-      --radius: 14px;
+      --bg:#f7f9fc; --ink:#0f172a; --muted:#64748b; --border:#e6e9f2; --primary:#2563eb; --primary-700:#1d4ed8;
+      --success:#22c55e; --surface:#fff; --code-bg:#0b1020; --code-fg:#e2e8f0; --shadow:0 8px 24px rgba(2,6,23,.06); --radius:14px;
     }
-
-    html,body{height:100%}
-    body{
-      margin:0;
-      font:14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-      color:var(--ink);
-      background:
-        radial-gradient(1200px 600px at 10% -10%, #eef2ff 0%, rgba(238,242,255,0) 60%),
-        radial-gradient(1000px 500px at 100% 0%, #e0f2fe 0%, rgba(224,242,254,0) 55%),
-        var(--bg);
-    }
+    body{ margin:0; font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; color:var(--ink);
+      background: radial-gradient(1200px 600px at 10% -10%, #eef2ff 0%, rgba(238,242,255,0) 60%),
+                  radial-gradient(1000px 500px at 100% 0%, #e0f2fe 0%, rgba(224,242,254,0) 55%),
+                  var(--bg);}
     .container{ max-width:1200px; margin:28px auto; padding:0 18px; }
-
     .headline{ display:flex; align-items:flex-end; gap:14px; margin-bottom:6px; }
-    .headline h1{ margin:0; font-size:32px; letter-spacing:-0.02em; }
+    .headline h1{ margin:0; font-size:32px; letter-spacing:-.02em; }
     .beta{ font-size:12px; padding:3px 8px; border-radius:999px; background:#e0e7ff; color:#312e81; font-weight:700; }
     .sub{ color:var(--muted); margin:0 0 18px; }
-
-    .toolbar{
-      display:flex; gap:10px; flex-wrap:wrap; align-items:center;
-      background:var(--surface); border:1px solid var(--border); box-shadow:var(--shadow);
-      padding:12px; border-radius:var(--radius); margin-bottom:16px;
-    }
-
+    .toolbar{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; background:var(--surface); border:1px solid var(--border);
+      box-shadow:var(--shadow); padding:12px; border-radius:var(--radius); margin-bottom:16px; }
     .field{ position:relative; display:flex; align-items:center; flex:1 1 520px; min-width:240px; }
     .field svg{ position:absolute; left:12px; width:18px; height:18px; color:var(--muted); }
-    .input{
-      width:100%; padding:11px 12px 11px 36px;
-      border:1px solid var(--border); border-radius:12px; background:#fff; outline:none;
-    }
+    .input{ width:100%; padding:11px 12px 11px 36px; border:1px solid var(--border); border-radius:12px; background:#fff; outline:none;}
     .input:focus{ box-shadow:0 0 0 3px rgba(37,99,235,.15); border-color:#c7d2fe; }
-
-    .btn{
-      display:inline-flex; align-items:center; gap:8px; padding:10px 14px;
-      border-radius:12px; border:1px solid var(--border); background:#fff; cursor:pointer;
-      font-weight:700; color:var(--ink);
-      transition:transform .04s ease, box-shadow .2s ease, background .2s;
-    }
-    .btn:hover{ box-shadow:0 4px 14px rgba(2,6,23,.06) }
-    .btn:active{ transform:translateY(1px) }
-    .btn svg{ width:16px; height:16px }
-    .btn.primary{ background:var(--primary); color:#fff; border-color:var(--primary); }
-    .btn.primary:hover{ background:var(--primary-700) }
+    .btn{ display:inline-flex; align-items:center; gap:8px; padding:10px 14px; border-radius:12px; border:1px solid var(--border);
+      background:#fff; cursor:pointer; font-weight:700; color:var(--ink); transition:transform .04s, box-shadow .2s; }
+    .btn:hover{ box-shadow:0 4px 14px rgba(2,6,23,.06) } .btn:active{ transform:translateY(1px) }
+    .btn.primary{ background:var(--primary); color:#fff; border-color:var(--primary); } .btn.primary:hover{ background:var(--primary-700) }
     .btn.active{ outline:2px solid var(--success); }
-
-    .grid{ display:grid; gap:16px; grid-template-columns: 1fr 360px; }
-    @media (max-width: 1100px){ .grid{ grid-template-columns:1fr; } }
-
-    .card{
-      background:var(--surface); border:1px solid var(--border);
-      border-radius:var(--radius); box-shadow:var(--shadow);
-      overflow:hidden;
-    }
-    .viewer-toolbar{
-      display:flex; justify-content:space-between; align-items:center;
-      padding:10px 12px; border-bottom:1px solid var(--border); background:linear-gradient(#fff, #fbfdff);
-    }
+    .grid{ display:grid; gap:16px; grid-template-columns:1fr 360px; } @media (max-width:1100px){ .grid{ grid-template-columns:1fr; } }
+    .card{ background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); box-shadow:var(--shadow); overflow:hidden; }
+    .viewer-toolbar{ display:flex; justify-content:space-between; align-items:center; padding:10px 12px; border-bottom:1px solid var(--border);
+      background:linear-gradient(#fff,#fbfdff); }
     .status{ display:inline-flex; align-items:center; gap:8px; color:var(--muted); font-weight:600; }
-    .dot{ width:10px; height:10px; border-radius:999px; background:#cbd5e1; box-shadow:0 0 0 2px #f1f5f9 inset }
-    .dot.ok{ background:var(--success); box-shadow:0 0 0 2px rgba(34,197,94,.25) }
-
-    .snip{
-      position:relative; height:680px; background:#fff; overflow:hidden;
-      --c:#9aa6b2;
-      box-shadow: inset 0 0 0 1px var(--border);
-    }
-    .snip::before,
-    .snip::after{
-      content:""; position:absolute; inset:0; pointer-events:none; border-radius:var(--radius);
-      background:
+    .dot{ width:10px; height:10px; border-radius:999px; background:#cbd5e1; box-shadow:0 0 0 2px #f1f5f9 inset } .dot.ok{ background:var(--success); box-shadow:0 0 0 2px rgba(34,197,94,.25) }
+    .snip{ position:relative; height:680px; background:#fff; overflow:hidden; box-shadow: inset 0 0 0 1px var(--border); }
+    .snip::before,.snip::after{ content:""; position:absolute; inset:0; pointer-events:none; border-radius:var(--radius);
+      --c:#9aa6b2; background:
         linear-gradient(90deg, transparent 12px, var(--c) 12px, var(--c) 14px, transparent 14px) top left,
         linear-gradient(0deg,  transparent 12px, var(--c) 12px, var(--c) 14px, transparent 14px) top left,
         linear-gradient(90deg, transparent 12px, var(--c) 12px, var(--c) 14px, transparent 14px) bottom right,
         linear-gradient(0deg,  transparent 12px, var(--c) 12px, var(--c) 14px, transparent 14px) bottom right;
-      background-size:16px 16px, 16px 16px, 16px 16px, 16px 16px;
-      background-repeat:no-repeat;
-    }
+      background-size:16px 16px; background-repeat:no-repeat; }
     .snip iframe{ position:absolute; inset:0; width:100%; height:100%; border:0; background:#fff; }
-
     .side .head{ padding:12px; border-bottom:1px solid var(--border); font-weight:800; }
     .side .body{ padding:12px; }
-    .row2{ display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin:8px 0 10px; }
-    .chip{ background:#f1f5f9; border:1px solid var(--border); color:#0f172a; padding:6px 10px; border-radius:999px; font-size:12px; font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .row2{ display:grid; grid-template-columns:1fr 1fr; gap:8px; margin:8px 0 10px; }
+    .chip{ background:#f1f5f9; border:1px solid var(--border); color:#0f172a; padding:6px 10px; border-radius:999px; font-size:12px; font-weight:700;
+      white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .kv{ color:var(--muted); font-weight:600; }
-    .code{
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      background:var(--code-bg); color:var(--code-fg);
-      padding:12px; border-radius:10px; border:1px solid rgba(148,163,184,.25); min-height:96px;
-      overflow:auto; box-shadow:inset 0 0 0 1px rgba(255,255,255,.05);
-    }
+    .code{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background:var(--code-bg); color:var(--code-fg);
+      padding:12px; border-radius:10px; border:1px solid rgba(148,163,184,.25); overflow:auto; box-shadow:inset 0 0 0 1px rgba(255,255,255,.05); }
   </style>
 </head>
 <body>
@@ -121,7 +63,7 @@
       <h1>URL inspector</h1>
       <span class="beta">beta</span>
     </div>
-    <p class="sub">Render a page in the snipping frame, then click <b>Pick elements</b> to highlight & copy selectors.</p>
+    <p class="sub">Render a page, click <b>Pick elements</b>, then click something to get a clean selector and a paste-ready CSS block.</p>
 
     <div class="toolbar">
       <label class="field" for="url">
@@ -142,9 +84,9 @@
         Pick elements
       </button>
 
-      <button id="copy" class="btn" title="Copy clean selector">
+      <button id="copyCss" class="btn" title="Copy generated CSS">
         <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M9 9h9v9H9z" stroke="currentColor" stroke-width="1.8"/><path d="M6 6h9v9" stroke="currentColor" stroke-width="1.8"/></svg>
-        Copy selector
+        Copy CSS
       </button>
     </div>
 
@@ -174,8 +116,12 @@
           </div>
 
           <div style="margin-top:10px">
-            <div class="kv" style="margin-bottom:6px">Clean selector (copied)</div>
+            <div class="kv" style="margin-bottom:6px">Clean selector</div>
             <pre id="selectorClean" class="code">/* Click Pick, then click an element */</pre>
+
+            <div class="kv" style="margin:12px 0 6px">Generated CSS</div>
+            <pre id="cssBlock" class="code" style="min-height:140px">/* The CSS for your stylesheet will appear here */</pre>
+
             <details style="margin-top:8px">
               <summary class="kv" style="cursor:pointer">Full path</summary>
               <pre id="selectorPath" class="code" style="min-height:64px"></pre>
@@ -191,7 +137,7 @@
     const urlEl = document.getElementById('url');
     const loadBtn = document.getElementById('load');
     const pickBtn = document.getElementById('pick');
-    const copyBtn = document.getElementById('copy');
+    const copyCssBtn = document.getElementById('copyCss');
     const statusEl = document.getElementById('status');
     const dotEl = document.getElementById('dot');
     const view = document.getElementById('view');
@@ -202,9 +148,10 @@
     const sizeEl = document.getElementById('size');
     const selectorCleanEl = document.getElementById('selectorClean');
     const selectorPathEl  = document.getElementById('selectorPath');
+    const cssBlockEl      = document.getElementById('cssBlock');
 
     let picking = false;
-    let lastSelector = "";
+    let lastCss = "";
 
     // Load URL
     loadBtn.addEventListener('click', () => loadUrl(urlEl.value));
@@ -215,7 +162,7 @@
       if (!u) { alert("Enter a URL"); return; }
       status('Loading…', false);
       const encoded = encodeURIComponent(u);
-      view.src = `/api/proxy?u=${encoded}`;
+      view.src = \`/api/proxy?u=\${encoded}\`;
     }
 
     // Toggle picker
@@ -227,13 +174,13 @@
       }
     });
 
-    // Copy clean selector
-    copyBtn.addEventListener('click', async () => {
-      if (!lastSelector) return;
+    // Copy generated CSS
+    copyCssBtn.addEventListener('click', async () => {
+      if (!lastCss) return;
       try {
-        await navigator.clipboard.writeText(lastSelector);
-        copyBtn.textContent = 'Copied!';
-        setTimeout(()=>copyBtn.textContent='Copy selector', 900);
+        await navigator.clipboard.writeText(lastCss);
+        copyCssBtn.textContent = 'Copied!';
+        setTimeout(()=>copyCssBtn.textContent='Copy CSS', 900);
       } catch {}
     });
 
@@ -247,17 +194,18 @@
         status('Ready', true);
         if (picking) view.contentWindow.postMessage({ type:'toggle-picker', picking:true }, '*');
       } else if (type === 'hover') {
-        status(`Hover: ${payload.tag}`, false);
+        status(\`Hover: \${payload.tag}\`, false);
       } else if (type === 'select') {
-        const { tag, id, classes, rect, selectorMin, selectorPretty, selectorPath } = payload;
+        const { tag, id, classes, rect, selectorMin, selectorPretty, selectorPath, cssBlock } = payload;
         tagEl.textContent = tag || '–';
         idEl.textContent = id || '–';
         classesEl.textContent = classes && classes.length ? classes.join('.') : '–';
-        sizeEl.textContent = rect ? `${Math.round(rect.width)}×${Math.round(rect.height)}` : '–';
+        sizeEl.textContent = rect ? \`\${Math.round(rect.width)}×\${Math.round(rect.height)}\` : '–';
 
         selectorCleanEl.textContent = selectorPretty || selectorMin || '–';
         selectorPathEl.textContent  = selectorPath || '–';
-        lastSelector = selectorMin || selectorPath || '';
+        cssBlockEl.textContent      = cssBlock || '/* No CSS extracted */';
+        lastCss = cssBlock || '';
       }
     });
 
