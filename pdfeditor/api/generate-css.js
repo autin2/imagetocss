@@ -1,27 +1,25 @@
 // pages/api/generate-css.js
 // CSS-only, component-scoped generator with optional Critique→Fix cycles.
-// Uses OpenAI Responses API with image+text input.
-// Guardrails: use gradients only if the screenshot clearly has one.
-// Returns: { draft, css, versions, passes, palette, notes, scope, component, model }
+// Robust against truncation: model must wrap output in /*START_CSS*/ ... /*END_CSS*/,
+// then we extract + auto-repair (balance braces/parens, fix dangling rgba, etc.).
 
-// IMPORTANT: we read the raw stream ourselves (Next.js / Vercel)
 export const config = { api: { bodyParser: false } };
 
 import OpenAI from "openai";
 
 // Preferred model first, then fallbacks your account likely has.
 const MODEL_FALLBACKS = [
-  "gpt-5",        // primary
+  "gpt-5",        // primary (if available to your project)
   "gpt-5-mini",   // smaller/faster
-  "gpt-4.1-mini", // widely available
-  "gpt-4o-mini"   // broadly available legacy mini
+  "gpt-4.1-mini",
+  "gpt-4o-mini"
 ];
 
-// Token caps for Responses API (use max_output_tokens, not max_tokens)
+// Token caps (Responses API uses max_output_tokens)
 const MAX_TOKENS_DRAFT = 1400;
 const MAX_TOKENS_CRIT  = 800;
 const MAX_TOKENS_FIX   = 1600;
-const PING_TOKENS      = 32;   // >= 16 required by API
+const PING_TOKENS      = 32; // >=16 required
 
 export default async function handler(req, res) {
   try {
@@ -30,22 +28,20 @@ export default async function handler(req, res) {
       return res.status(405).json({ error: "Method not allowed" });
     }
 
-    // ----- Read raw body -----
+    // Read raw body
     let raw = "";
     for await (const chunk of req) raw += chunk;
 
     let parsed;
     try { parsed = JSON.parse(raw || "{}"); }
-    catch (e) {
-      return res.status(400).json({ error: "Invalid JSON body", details: String(e?.message || e) });
-    }
+    catch (e) { return res.status(400).json({ error: "Invalid JSON body", details: String(e?.message || e) }); }
 
     const {
       image,
       palette = [],
       scope = ".comp",
       component = "component",
-      double_checks = 1,        // 1 fast pass by default (bounded 1..4)
+      double_checks = 1,        // default 1 (bounded 1..4)
       force_solid = false,      // client flatness hint
       solid_color = ""          // suggested hex when flat
     } = parsed;
@@ -62,12 +58,10 @@ export default async function handler(req, res) {
     }
 
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-    // ---- choose a working model (probe fallbacks if needed) ----
     const model = await pickWorkingModel(client, MODEL_FALLBACKS);
 
     // ---------- DRAFT ----------
-    let draft = await passDraft(client, model, {
+    let draftRaw = await passDraft(client, model, {
       image,
       palette: Array.isArray(palette) ? palette : [],
       scope,
@@ -76,7 +70,10 @@ export default async function handler(req, res) {
       solid_color: String(solid_color || "")
     });
 
-    draft = enforceScope(draft, scope);
+    // Extract between markers and scope
+    let draft = enforceScope(extractCssWithMarkers(draftRaw) || cssOnly(draftRaw), scope);
+    draft = repairCss(draft);
+
     let css = draft;
     const versions = [css];
     let lastCritique = "";
@@ -95,11 +92,12 @@ export default async function handler(req, res) {
         image, css, palette, scope, component, force_solid
       });
 
-      let fixed = await passFix(client, model, {
+      let fixedRaw = await passFix(client, model, {
         image, css, critique: lastCritique, palette, scope, component, force_solid, solid_color
       });
 
-      fixed = enforceScope(fixed, scope);
+      let fixed = enforceScope(extractCssWithMarkers(fixedRaw) || cssOnly(fixedRaw), scope);
+      fixed = repairCss(fixed);
 
       if (force_solid) {
         const hex = (String(solid_color || "").match(/^#([0-9a-f]{6}|[0-9a-f]{3})$/i) ? solid_color : null) || "#cccccc";
@@ -122,6 +120,7 @@ export default async function handler(req, res) {
       component,
       model
     });
+
   } catch (err) {
     console.error("generate-css error:", err);
     const status = Number(err?.status || err?.code || 500);
@@ -148,17 +147,20 @@ function cssOnly(text = "") {
 }
 function textOnly(s = "") { return String(s).replace(/```[\s\S]*?```/g, "").trim(); }
 
-/** Scope enforcement: prefix top-level selectors with the scope (except :root/@rules). */
+/** Extract CSS between /*START_CSS*\/ and /*END_CSS*\/ markers. */
+function extractCssWithMarkers(s = "") {
+  const m = String(s).match(/\/\*START_CSS\*\/([\s\S]*?)\/\*END_CSS\*\//);
+  return m ? m[1].trim() : "";
+}
+
+/** Prefix top-level selectors with the scope (except :root/@rules). */
 function enforceScope(inputCss = "", scope = ".comp") {
-  let css = cssOnly(inputCss);
+  let css = inputCss.trim();
   css = css.replace(/(^|})\s*([^@}{]+?)\s*\{/g, (m, p1, selectors) => {
     const scoped = selectors
       .split(",")
       .map((s) => s.trim())
-      .map((sel) => {
-        if (!sel || sel.startsWith(scope) || sel.startsWith(":root")) return sel;
-        return `${scope} ${sel}`;
-      })
+      .map((sel) => (!sel || sel.startsWith(scope) || sel.startsWith(":root") ? sel : `${scope} ${sel}`))
       .join(", ");
     return `${p1} ${scoped} {`;
   });
@@ -177,6 +179,56 @@ function solidifyCss(css = "", hex = "#cccccc") {
     });
 }
 
+/** Attempt to repair common truncations: unbalanced braces/parens, dangling rgba(, missing semicolons. */
+function repairCss(css = "") {
+  let out = css;
+
+  // 1) Finish dangling rgba( … → if ends without ')', try to complete to rgba(0,0,0,0.2)
+  out = out.replace(/rgba\(\s*([^)]+)?$/i, (m, inside) => {
+    // If it looks like "rgba(" or "rgba(255,255,255, 0.3" without ')'
+    const parts = (inside || "").split(",").map(s => s.trim()).filter(Boolean);
+    while (parts.length < 4) parts.push(parts.length < 3 ? "0" : "0.2");
+    const [r,g,b,a] = parts.slice(0,4);
+    return `rgba(${num(r)}, ${num(g)}, ${num(b)}, ${num(a)})`;
+  });
+
+  // 2) Ensure each box-shadow / text-shadow line ends with a semicolon
+  out = out.replace(/(box-shadow|text-shadow)\s*:[^;{}]+(?=\n|$)/gi, (m) => m + ";");
+
+  // 3) Balance parentheses
+  out = balanceParens(out);
+
+  // 4) Ensure every rule has a closing `}`
+  out = balanceBraces(out);
+
+  return out.trim();
+}
+
+function num(v){
+  const n = parseFloat(String(v).replace(/[^\d.]/g, ""));
+  return Number.isFinite(n) ? n : 0;
+}
+
+function balanceParens(s=""){
+  let open = 0; let res = "";
+  for (const ch of s) {
+    if (ch === "(") open++;
+    if (ch === ")") open = Math.max(0, open - 1);
+    res += ch;
+  }
+  while (open-- > 0) res += ")";
+  return res;
+}
+
+function balanceBraces(s=""){
+  // Very simple: add a closing brace if we have more '{' than '}'.
+  const opens = (s.match(/{/g) || []).length;
+  const closes = (s.match(/}/g) || []).length;
+  let out = s;
+  for (let i = 0; i < opens - closes; i++) out += "\n}";
+  return out;
+}
+
 /* ======== model picking with graceful fallback ======== */
 async function pickWorkingModel(client, candidates) {
   let lastErr;
@@ -184,17 +236,14 @@ async function pickWorkingModel(client, candidates) {
     try {
       const ping = await client.responses.create({
         model: m,
-        input: [
-          { role: "user", content: [{ type: "input_text", text: "ping" }] }
-        ],
-        max_output_tokens: PING_TOKENS // must be >= 16
+        input: [ { role: "user", content: [ { type: "input_text", text: "ping" } ] } ],
+        max_output_tokens: PING_TOKENS
       });
       if (ping?.output_text !== undefined) return m;
     } catch (e) {
       lastErr = e;
       const msg = (e?.message || "").toLowerCase();
       if (msg.includes("does not exist") || msg.includes("you do not have access")) continue;
-      // Other errors (quota, key invalid, etc.) → bubble up
       throw e;
     }
   }
@@ -203,8 +252,8 @@ async function pickWorkingModel(client, candidates) {
 
 /* ================= model passes (Responses API) ================= */
 
-async function passDraft(client, model, { image, palette, scope, component, force_solid, solid_color }) {
-  const sys = [
+function draftSystemPrompt() {
+  return [
     "You are a front-end CSS engine. Output VALID vanilla CSS only (no HTML/Markdown).",
     "You are styling a SINGLE UI COMPONENT, not a full page.",
     "All selectors MUST be under the provided SCOPE CLASS.",
@@ -213,8 +262,18 @@ async function passDraft(client, model, { image, palette, scope, component, forc
     "Gradient rule:",
     "- Only use linear-gradient if a clear gradient is visible.",
     "- If the background appears uniform (flat), use a single background-color.",
-    "- Do NOT add glossy overlays (::after) unless the screenshot clearly shows a highlight."
+    "- Do NOT add glossy overlays (::after) unless the screenshot clearly shows a highlight.",
+    "",
+    "MANDATORY OUTPUT FORMAT:",
+    "Return CSS ONLY and wrap it EXACTLY like this:",
+    "/*START_CSS*/",
+    "<your CSS here>",
+    "/*END_CSS*/"
   ].join("\n");
+}
+
+async function passDraft(client, model, { image, palette, scope, component, force_solid, solid_color }) {
+  const sys = draftSystemPrompt();
 
   const guard = force_solid
     ? [
@@ -234,7 +293,7 @@ async function passDraft(client, model, { image, palette, scope, component, forc
     "- No global selectors (html, body, *). No headers/footers/layout.",
     Array.isArray(palette) && palette.length ? `Optional palette tokens: ${palette.join(", ")}` : "Palette is optional.",
     guard,
-    "Return CSS ONLY."
+    "IMPORTANT: Wrap your CSS between /*START_CSS*/ and /*END_CSS*/ with nothing else outside."
   ].join("\n");
 
   const r = await client.responses.create({
@@ -244,14 +303,30 @@ async function passDraft(client, model, { image, palette, scope, component, forc
       role: "user",
       content: [
         { type: "input_text", text: usr },
-        { type: "input_image", image_url: image } // data URL accepted
+        { type: "input_image", image_url: image }
       ]
     }],
     max_output_tokens: MAX_TOKENS_DRAFT
   });
 
-  const out = r?.output_text || "";
-  return cssOnly(out);
+  return r?.output_text || "";
+}
+
+function fixSystemPrompt() {
+  return [
+    "Return CSS only (no HTML/Markdown). Overwrite the stylesheet to resolve the critique and better match the SINGLE component.",
+    "All selectors must remain under the provided scope.",
+    "No global selectors or page-level structures.",
+    "Gradient rule:",
+    "- Only use gradients if they are visually present in the screenshot.",
+    "- If caller indicates flat, use a single background-color (no gloss).",
+    "",
+    "MANDATORY OUTPUT FORMAT:",
+    "Return CSS ONLY wrapped EXACTLY like:",
+    "/*START_CSS*/",
+    "<your CSS here>",
+    "/*END_CSS*/"
+  ].join("\n");
 }
 
 async function passCritique(client, model, { image, css, palette, scope, component, force_solid }) {
@@ -291,19 +366,11 @@ async function passCritique(client, model, { image, css, palette, scope, compone
     max_output_tokens: MAX_TOKENS_CRIT
   });
 
-  const out = r?.output_text || "";
-  return textOnly(out);
+  return textOnly(r?.output_text || "");
 }
 
 async function passFix(client, model, { image, css, critique, palette, scope, component, force_solid, solid_color }) {
-  const sys = [
-    "Return CSS only (no HTML/Markdown). Overwrite the stylesheet to resolve the critique and better match the SINGLE component.",
-    "All selectors must remain under the provided scope.",
-    "No global selectors or page-level structures.",
-    "Gradient rule:",
-    "- Only use gradients if they are visually present in the screenshot.",
-    "- If caller indicates flat, use a single background-color (no gloss)."
-  ].join("\n");
+  const sys = fixSystemPrompt();
 
   const guard = force_solid
     ? [
@@ -326,7 +393,8 @@ async function passFix(client, model, { image, css, critique, palette, scope, co
     css,
     "```",
     Array.isArray(palette) && palette.length ? `Palette hint (optional): ${palette.join(", ")}` : "",
-    guard
+    guard,
+    "IMPORTANT: Wrap your CSS between /*START_CSS*/ and /*END_CSS*/ with nothing else outside."
   ].join("\n");
 
   const r = await client.responses.create({
@@ -342,6 +410,5 @@ async function passFix(client, model, { image, css, critique, palette, scope, co
     max_output_tokens: MAX_TOKENS_FIX
   });
 
-  const out = r?.output_text || css;
-  return cssOnly(out);
+  return r?.output_text || css;
 }
