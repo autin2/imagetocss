@@ -1,6 +1,6 @@
 // /api/proxy.js
-// Serverless HTML proxy that injects an element-picker. Now suggests
-// semantic selectors like `.cta-button` instead of raw hashed classes.
+// Serverless HTML proxy that injects an element-picker. The picker now returns
+// a semantic selector (.cta-button/.button/unique) *and* a full CSS block.
 
 export default async function handler(req, res) {
   try {
@@ -11,8 +11,8 @@ export default async function handler(req, res) {
     try { target = new URL(u); } catch { return res.status(400).send("Invalid URL"); }
     if (!/^https?:$/.test(target.protocol)) return res.status(400).send("Only http/https allowed");
 
-    // Block obvious private ranges / localhost
     const host = target.hostname.toLowerCase();
+    // Block private ranges / localhost
     if (
       host === 'localhost' || host === '127.0.0.1' || host === '::1' ||
       /^10\./.test(host) || /^192\.168\./.test(host) ||
@@ -30,13 +30,13 @@ export default async function handler(req, res) {
     }
     let html = await r.text();
 
-    // Remove inline CSP meta (headers aren't preserved anyway)
+    // Strip inline CSP metas (headers won't carry over anyway)
     html = html.replace(/<meta[^>]+http-equiv=["']content-security-policy["'][^>]*>/gi, '');
 
-    // Make relative URLs work
+    // Ensure relative URLs resolve correctly
     const baseTag = `<base href="${target.origin}${target.pathname.replace(/[^/]*$/, '')}">`;
 
-    // Inject picker with CTA-aware selector suggestion
+    // === Inject the picker (selector + CSS extractor) ===
     const picker = `
 <script>
 (function(){
@@ -125,7 +125,6 @@ export default async function handler(req, res) {
     const radius = parseFloat(s.borderTopLeftRadius||'0') + parseFloat(s.borderBottomRightRadius||'0');
     const cursor = s.cursor;
     const display = s.display;
-    // Button-ish if has padding, pointer, non-inline or bg/radius
     return (pad >= 16 && (cursor === 'pointer' || display !== 'inline')) || bg || radius >= 6;
   }
 
@@ -188,6 +187,131 @@ export default async function handler(req, res) {
     return parts.map((p,i) => (i ? '  '.repeat(i) : '') + p).join(' >\\n');
   }
 
+  // ---------- CSS extraction ----------
+  // Convert rgb/rgba -> hex (preserves alpha as rgba if not fully opaque)
+  function colorToCss(v){
+    if (!v) return null;
+    if (v === 'transparent' || /^rgba\\(\\s*0\\s*,\\s*0\\s*,\\s*0\\s*,\\s*0\\s*\\)$/i.test(v)) return null;
+    const m = v.match(/rgba?\\(([^)]+)\\)/i);
+    if (!m) return v;
+    const parts = m[1].split(',').map(s => parseFloat(s.trim()));
+    const [r,g,b,a] = parts;
+    if (parts.length === 4 && a < 1) return \`rgba(\${r}, \${g}, \${b}, \${a})\`;
+    const toHex = (n)=>('#'+n.toString(16).padStart(2,'0')).slice(1);
+    return '#'+[r,g,b].map(x => Math.max(0, Math.min(255, Math.round(x))).toString(16).padStart(2,'0')).join('');
+  }
+
+  // Condense 4-side props into shorthand when possible
+  function sides(s, base){
+    const t = s.getPropertyValue(base+'-top');
+    const r = s.getPropertyValue(base+'-right');
+    const b = s.getPropertyValue(base+'-bottom');
+    const l = s.getPropertyValue(base+'-left');
+    if (!t && !r && !b && !l) return null;
+    if (t===b && r===l){
+      if (t===r) return t;         // 1 value
+      return \`\${t} \${r}\`;       // 2 values
+    }
+    if (r===l) return \`\${t} \${r} \${b}\`; // 3 values
+    return \`\${t} \${r} \${b} \${l}\`;      // 4 values
+  }
+
+  function borderShorthand(s){
+    const w = s.borderTopWidth, st = s.borderTopStyle, c = colorToCss(s.borderTopColor);
+    const wR = s.borderRightWidth, stR = s.borderRightStyle, cR = colorToCss(s.borderRightColor);
+    const wB = s.borderBottomWidth, stB = s.borderBottomStyle, cB = colorToCss(s.borderBottomColor);
+    const wL = s.borderLeftWidth, stL = s.borderLeftStyle, cL = colorToCss(s.borderLeftColor);
+    const allEq = (w===wR && w===wB && w===wL && st===stR && st===stB && st===stL && c===cR && c===cB && c===cL);
+    if (allEq && w!=='0px' && st!=='none' && c){ return \`\${w} \${st} \${c}\`; }
+    return null; // fall back to per-side later if needed
+  }
+
+  function radiusShorthand(s){
+    const tl = s.borderTopLeftRadius, tr = s.borderTopRightRadius, br = s.borderBottomRightRadius, bl = s.borderBottomLeftRadius;
+    if (tl===tr && tr===br && br===bl) return tl;
+    return \`\${tl} \${tr} \${br} \${bl}\`;
+  }
+
+  function extractCss(el, selector){
+    const s = getComputedStyle(el);
+    const out = [];
+
+    // Layout / box
+    const disp = s.display;
+    if (disp && disp !== 'inline') out.push(['display', disp]);
+
+    const pos = s.position;
+    if (pos && pos !== 'static') out.push(['position', pos]); // careful with absolute/fixed
+
+    const overflow = s.overflow;
+    if (overflow && overflow !== 'visible') out.push(['overflow', overflow]);
+
+    const m = sides(s, 'margin');
+    if (m && !/^0(px)?$/i.test(m)) out.push(['margin', m]);
+
+    const p = sides(s, 'padding');
+    if (p && !/^0(px)?$/i.test(p)) out.push(['padding', p]);
+
+    // Flex alignment
+    if (disp.includes('flex')) {
+      const fd = s.flexDirection; if (fd && fd!=='row') out.push(['flex-direction', fd]);
+      const jc = s.justifyContent; if (jc && jc!=='normal' && jc!=='flex-start') out.push(['justify-content', jc]);
+      const ai = s.alignItems; if (ai && ai!=='normal' && ai!=='stretch') out.push(['align-items', ai]);
+      const gap = s.gap; if (gap && !/^0(px)?$/i.test(gap)) out.push(['gap', gap]);
+    }
+
+    // Typography
+    const ff = s.fontFamily; if (ff) out.push(['font-family', ff.replaceAll('"','\\"')]);
+    const fz = s.fontSize; if (fz) out.push(['font-size', fz]);
+    const fw = s.fontWeight; if (fw && fw!=='400') out.push(['font-weight', fw]);
+    const lh = s.lineHeight; if (lh && lh!=='normal') out.push(['line-height', lh]);
+    const ls = s.letterSpacing; if (ls && ls!=='normal' && ls!=='0px') out.push(['letter-spacing', ls]);
+    const tt = s.textTransform; if (tt && tt!=='none') out.push(['text-transform', tt]);
+    const ta = s.textAlign; if (ta && ta!=='start') out.push(['text-align', ta]);
+    const td = s.textDecorationLine; if (td && td!=='none') out.push(['text-decoration', td]);
+
+    // Colors / background
+    const color = colorToCss(s.color); if (color) out.push(['color', color]);
+    const bg = colorToCss(s.backgroundColor); if (bg) out.push(['background-color', bg]);
+    const bgImg = s.backgroundImage; if (bgImg && bgImg!=='none') out.push(['background-image', bgImg]);
+    const bgSize = s.backgroundSize; if (bgSize && bgImg && bgImg!=='none') out.push(['background-size', bgSize]);
+    const bgPos = s.backgroundPosition; if (bgPos && bgImg && bgImg!=='none') out.push(['background-position', bgPos]);
+
+    // Border / radius / shadow
+    const bAll = borderShorthand(s);
+    if (bAll) {
+      out.push(['border', bAll]);
+    } else {
+      const bt = s.borderTopWidth; const bst = s.borderTopStyle; const bc = colorToCss(s.borderTopColor);
+      if (bst!=='none' && bt!=='0px' && bc) out.push(['border-top', \`\${bt} \${bst} \${bc}\`]);
+      const br = s.borderRightWidth; const brst = s.borderRightStyle; const brc = colorToCss(s.borderRightColor);
+      if (brst!=='none' && br!=='0px' && brc) out.push(['border-right', \`\${br} \${brst} \${brc}\`]);
+      const bb = s.borderBottomWidth; const bbst = s.borderBottomStyle; const bbc = colorToCss(s.borderBottomColor);
+      if (bbst!=='none' && bb!=='0px' && bbc) out.push(['border-bottom', \`\${bb} \${bbst} \${bbc}\`]);
+      const bl = s.borderLeftWidth; const blst = s.borderLeftStyle; const blc = colorToCss(s.borderLeftColor);
+      if (blst!=='none' && bl!=='0px' && blc) out.push(['border-left', \`\${bl} \${blst} \${blc}\`]);
+    }
+
+    const rad = radiusShorthand(s);
+    if (rad && rad!=='0px') out.push(['border-radius', rad]);
+
+    const sh = s.boxShadow; if (sh && sh!=='none') out.push(['box-shadow', sh]);
+
+    // Cursor & transitions (nice to keep if present)
+    const cur = s.cursor; if (cur && cur!=='auto') out.push(['cursor', cur]);
+    const tr = s.transition; if (tr && tr!=='all 0s ease 0s' && tr!=='0s') out.push(['transition', tr]);
+
+    // Build rule
+    // If we suggested a semantic class, use that; otherwise the minimal selector.
+    let sel = selector;
+    if (!sel) sel = uniqueSelector(el);
+
+    const lines = out.map(([k,v]) => \`  \${k}: \${v};\`);
+    const css = \`\${sel} {\\n\${lines.join('\\n')}\\n}\`;
+
+    return css;
+  }
+
   // ---------- interactions ----------
   function onMove(e){
     if (!picking) return;
@@ -217,10 +341,11 @@ export default async function handler(req, res) {
 
     const r = el.getBoundingClientRect();
 
-    // Prefer semantic suggestion when available
+    // Prefer semantic suggestion
     const suggested = suggestSelector(el);          // '.cta-button' | '.button' | null
     const selectorMin  = suggested || uniqueSelector(el);
     const selectorPath = fullPath(el);
+    const cssBlock = extractCss(el, suggested || null); // will fall back internally if needed
 
     window.parent && window.parent.postMessage({
       type:'select',
@@ -230,8 +355,9 @@ export default async function handler(req, res) {
         classes: el.classList ? Array.from(el.classList) : [],
         rect: { x:r.x, y:r.y, width:r.width, height:r.height },
         selectorMin,
-        selectorPretty: pretty(selectorMin),
-        selectorPath
+        selectorPretty: (function(sel){ const parts = sel.split(/\\s*>\\s*/); return parts.map((p,i)=> (i?'  '.repeat(i):'')+p).join(' >\\n'); })(selectorMin),
+        selectorPath,
+        cssBlock
       }
     }, '*');
   }
@@ -258,7 +384,7 @@ export default async function handler(req, res) {
       html += picker;
     }
 
-    // Add <base> if not present
+    // Add <base> if missing
     if (!/<base\s/i.test(html)) {
       if (/<head[^>]*>/i.test(html)) {
         html = html.replace(/<head[^>]*>/i, (m) => `${m}\n${baseTag}`);
