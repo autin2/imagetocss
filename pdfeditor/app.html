@@ -11,6 +11,7 @@
       --accent:#0ea5e9; --accent-ink:#06222c; --ok:#16a34a; --err:#ef4444;
       --radius:14px; --shadow:0 8px 24px rgba(2,6,23,.06);
       --panelH: 560px;  /* fixed panel height so the left side doesn't resize */
+      --dash:#d8dee6;
     }
     *{box-sizing:border-box}
     body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,Arial}
@@ -20,12 +21,13 @@
     .grid{display:grid;grid-template-columns:1.05fr .95fr;gap:20px;align-items:start}
     @media (max-width:980px){
       .grid{grid-template-columns:1fr}
-      :root{ --panelH: auto; } /* let it flow on small screens */
+      :root{ --panelH: auto; }
     }
 
     .card{background:var(--paper);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow)}
     .panel{height:var(--panelH);display:flex;flex-direction:column}
     .pad{padding:16px}
+    .grow{flex:1 1 auto;min-height:0}
 
     /* Inputs, buttons */
     label{display:block;font-weight:700;color:var(--muted);margin:10px 0 6px}
@@ -39,11 +41,49 @@
     .btn.small{padding:8px 10px;font-size:13px}
     .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
 
-    /* Left: drop + preview (fixed area inside panel) */
-    .grow{flex:1 1 auto;min-height:0} /* allows internal scroll if content overflows */
-    .drop{border:2px dashed var(--border);background:#fff;border-radius:12px;padding:14px;text-align:center;color:var(--muted)}
+    /* Select image box (fills the whole grow area) */
+    .drop{
+      position:relative;
+      height:100%;
+      border:2px dashed var(--dash);
+      border-radius:12px;
+      color:var(--muted);
+      background:#fff;
+      display:grid;
+      place-items:center;
+      padding:14px;
+      overflow:hidden;
+      transition:border-color .2s, background .2s;
+    }
     .drop.drag{border-color:var(--accent);background:#f0fbff}
-    #preview{display:none;margin-top:10px;max-width:100%;max-height:280px;border:1px solid var(--border);border-radius:10px;object-fit:contain}
+    .drop .empty{text-align:center}
+    .drop .empty .row{justify-content:center;margin-top:8px}
+    .drop .hint{margin-top:6px;font-size:13px;color:var(--muted)}
+
+    /* The image lives INSIDE the box */
+    #preview{
+      display:none;        /* shown when has-image */
+      max-width:100%;
+      max-height:100%;
+      object-fit:contain;
+      border-radius:10px;
+    }
+    .drop.has-image #preview{display:block}
+    .drop.has-image .empty{display:none}
+
+    /* Hover overlay ONLY when image is selected */
+    .overlay{
+      position:absolute; inset:0;
+      display:grid; place-items:center;
+      background:rgba(2,6,23,.45);
+      opacity:0; pointer-events:none;
+      transition:opacity .15s ease;
+      border-radius:inherit;
+    }
+    .drop.has-image:hover .overlay,
+    .drop.has-image:focus-within .overlay{ opacity:1; pointer-events:auto; }
+    .overlay .btn{box-shadow:0 2px 10px rgba(0,0,0,.2)}
+    .overlay .btn.primary{background:#0ea5e9;color:#06222c;border-color:transparent}
 
     /* Right: code & errors */
     .bar{display:flex;align-items:center;justify-content:space-between;margin:6px 0}
@@ -52,7 +92,7 @@
       background:#0a0c10;color:#e5e7eb;font:13px/1.45 ui-monospace, Menlo, Consolas, monospace;
       border-radius:10px;border:1px solid #1f2937;padding:12px;overflow:auto;white-space:pre
     }
-    #output{flex:1 1 auto;min-height:180px} /* fills remaining space in right panel */
+    #output{flex:1 1 auto;min-height:180px}
     #errors{height:120px;border-color:rgba(239,68,68,.35); color:#ffe1e1; background:#2a0b0b}
 
     .hint{color:var(--muted);font-size:13px}
@@ -69,17 +109,28 @@
       <!-- LEFT: fixed-height panel -->
       <section class="card panel pad">
         <div class="grow">
-          <div class="drop" id="drop">
-            <div><b>Drop an image</b>, click <em>Choose</em>, or paste (Ctrl/Cmd+V).</div>
-            <div class="row" style="justify-content:center;margin-top:8px">
-              <button id="chooseBtn" class="btn small">Choose</button>
-              <button id="pasteBtn" class="btn small">Paste</button>
+          <div class="drop" id="drop" tabindex="0" aria-label="Drop or choose an image">
+            <!-- Empty state (shown until an image is selected) -->
+            <div id="emptyUi" class="empty">
+              <div><b>Drop an image</b>, click <em>Choose</em>, or paste (Ctrl/Cmd+V).</div>
+              <div class="row">
+                <button id="chooseBtn" class="btn small">Choose</button>
+                <button id="pasteBtn" class="btn small">Paste</button>
+              </div>
+              <div class="hint" id="sizeHint">No image selected</div>
             </div>
-            <div class="hint" id="sizeHint" style="margin-top:6px">No image selected</div>
+
+            <!-- Image lives inside the dashed box -->
+            <img id="preview" alt="Selected image preview"/>
+
+            <!-- Hover overlay (only when image is selected) -->
+            <div class="overlay" id="overlay">
+              <button id="changeBtn" class="btn primary">Change photo</button>
+            </div>
+
+            <!-- hidden input -->
             <input id="file" type="file" accept="image/*" hidden>
           </div>
-
-          <img id="preview" alt="Preview"/>
         </div>
 
         <div class="row" style="margin-top:12px">
@@ -123,8 +174,10 @@
     // ----- Elements -----
     const fileEl = document.getElementById('file');
     const dropEl = document.getElementById('drop');
+    const emptyUi = document.getElementById('emptyUi');
     const chooseBtn = document.getElementById('chooseBtn');
     const pasteBtn = document.getElementById('pasteBtn');
+    const changeBtn = document.getElementById('changeBtn');
     const sizeHint = document.getElementById('sizeHint');
     const preview = document.getElementById('preview');
 
@@ -145,6 +198,12 @@
 
     // ----- DnD / Choose / Paste -----
     chooseBtn.addEventListener('click', () => fileEl.click());
+    changeBtn.addEventListener('click', () => fileEl.click()); // overlay action
+    // Click anywhere on the box when empty → open file dialog
+    dropEl.addEventListener('click', (e) => {
+      if (!dropEl.classList.contains('has-image') && e.target === dropEl) fileEl.click();
+    });
+
     fileEl.addEventListener('change', (e) => { const f = e.target.files?.[0]; if (f) readFile(f); });
 
     dropEl.addEventListener('dragover', (e)=>{ e.preventDefault(); dropEl.classList.add('drag'); });
@@ -167,16 +226,30 @@
       if (it) readFile(it.getAsFile());
     });
 
+    // Keyboard: Enter/Space on empty drop opens file dialog
+    dropEl.addEventListener('keydown', (e)=>{
+      if (!dropEl.classList.contains('has-image') && (e.key === 'Enter' || e.key === ' ')) {
+        e.preventDefault(); fileEl.click();
+      }
+    });
+
     function readFile(file){
       const r = new FileReader();
       r.onload = () => {
         dataUrl = r.result;
         preview.src = dataUrl;
-        preview.style.display = 'block';
+        dropEl.classList.add('has-image');
         sizeHint.textContent = formatBytes(file.size || new Blob([dataUrl]).size);
         statusLead.textContent = "Image ready";
       };
       r.readAsDataURL(file);
+    }
+
+    function clearImage(){
+      dataUrl = "";
+      preview.src = "";
+      dropEl.classList.remove('has-image');
+      sizeHint.textContent = "No image selected";
     }
 
     function formatBytes(n){ if (!n && n!==0) return "0 KB"; const u=['B','KB','MB','GB']; let i=0; while(n>=1024 && i<u.length-1){n/=1024;i++} return `${n.toFixed(i?1:0)} ${u[i]}`; }
@@ -190,7 +263,7 @@
         body: JSON.stringify({ image, palette, scope, component }),
       });
 
-      const text = await r.text(); // raw
+      const text = await r.text();
       let json = null;
       try { json = JSON.parse(text); } catch {}
 
@@ -210,7 +283,7 @@
 
     // ----- Actions -----
     runBtn.addEventListener('click', onRun);
-    clearBtn.addEventListener('click', clearAll);
+    clearBtn.addEventListener('click', () => { clearOutputs(); clearImage(); });
     copyFinalBtn.addEventListener('click', async ()=> { if (!outputEl.textContent) return; try { await navigator.clipboard.writeText(outputEl.textContent); copyFlash(copyFinalBtn); } catch {} });
 
     async function onRun(){
@@ -237,11 +310,10 @@
 
         outputEl.textContent = res.css || "";
 
-        // If CSS came back empty, surface raw model text to debug extraction
         if (!res.css || !res.css.trim()) {
           errorsEl.textContent = `Model raw_out (first 2k):\n` + String(res.raw_out || "").slice(0, 2000);
         } else {
-          errorsEl.textContent = ""; // clear
+          errorsEl.textContent = "";
         }
       } catch (err) {
         apiStatus.textContent = String(err.status || 500); apiStatus.classList.add('err');
@@ -261,10 +333,6 @@
     function clearOutputs(){
       outputEl.textContent = ""; errorsEl.textContent = "";
       apiStatus.textContent = "—"; apiStatus.classList.remove('ok','err'); statusLead.textContent = "";
-    }
-    function clearAll(){
-      clearOutputs(); dataUrl=""; preview.src=""; preview.style.display="none";
-      sizeHint.textContent="No image selected"; scopeEl.value=".comp"; componentEl.value="button"; paletteEl.value="";
     }
     function copyFlash(btn){ const prev=btn.textContent; btn.textContent="Copied!"; setTimeout(()=>btn.textContent=prev, 900); }
   </script>
