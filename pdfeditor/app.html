@@ -10,43 +10,50 @@
       --bg:#f7f9fc; --ink:#0f172a; --muted:#64748b; --paper:#ffffff; --border:#e5e7eb;
       --accent:#0ea5e9; --accent-ink:#06222c; --ok:#16a34a; --err:#ef4444;
       --radius:14px; --shadow:0 8px 24px rgba(2,6,23,.06);
+      --panelH: 560px;  /* fixed panel height so the left side doesn't resize */
     }
     *{box-sizing:border-box}
     body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,Arial}
     .wrap{max-width:1000px;margin:28px auto;padding:0 18px}
     h1{margin:0 0 6px;font-size:30px;letter-spacing:-.02em}
     .sub{margin:0 0 14px;color:var(--muted)}
-    .grid{display:grid;grid-template-columns:1.05fr .95fr;gap:20px}
-    @media (max-width:980px){ .grid{grid-template-columns:1fr} }
+    .grid{display:grid;grid-template-columns:1.05fr .95fr;gap:20px;align-items:start}
+    @media (max-width:980px){
+      .grid{grid-template-columns:1fr}
+      :root{ --panelH: auto; } /* let it flow on small screens */
+    }
 
     .card{background:var(--paper);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow)}
+    .panel{height:var(--panelH);display:flex;flex-direction:column}
     .pad{padding:16px}
 
     /* Inputs, buttons */
     label{display:block;font-weight:700;color:var(--muted);margin:10px 0 6px}
-    input[type="text"], input[type="number"]{
+    input[type="text"]{
       width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--border);background:#fff;outline:none
     }
-    input[type="text"]:focus, input[type="number"]:focus{box-shadow:0 0 0 3px rgba(14,165,233,.18); border-color:#bfe6fb}
+    input[type="text"]:focus{box-shadow:0 0 0 3px rgba(14,165,233,.18); border-color:#bfe6fb}
     .btn{appearance:none;border:1px solid var(--border);background:#fff;color:var(--ink);
       padding:10px 14px;border-radius:10px;font-weight:700;cursor:pointer}
     .btn.primary{background:var(--accent);color:var(--accent-ink);border-color:transparent}
     .btn.small{padding:8px 10px;font-size:13px}
     .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
 
-    /* Drop + preview */
+    /* Left: drop + preview (fixed area inside panel) */
+    .grow{flex:1 1 auto;min-height:0} /* allows internal scroll if content overflows */
     .drop{border:2px dashed var(--border);background:#fff;border-radius:12px;padding:14px;text-align:center;color:var(--muted)}
     .drop.drag{border-color:var(--accent);background:#f0fbff}
-    #preview{display:none;margin-top:10px;max-width:100%;max-height:380px;border:1px solid var(--border);border-radius:10px}
+    #preview{display:none;margin-top:10px;max-width:100%;max-height:280px;border:1px solid var(--border);border-radius:10px;object-fit:contain}
 
-    /* Code areas */
-    .bar{display:flex;align-items:center;justify-content:space-between;margin:10px 0 6px}
+    /* Right: code & errors */
+    .bar{display:flex;align-items:center;justify-content:space-between;margin:6px 0}
     .bar .label{color:var(--muted);font-size:13px}
     pre.code{
       background:#0a0c10;color:#e5e7eb;font:13px/1.45 ui-monospace, Menlo, Consolas, monospace;
-      border-radius:10px;border:1px solid #1f2937;padding:12px;overflow:auto;height:220px;white-space:pre
+      border-radius:10px;border:1px solid #1f2937;padding:12px;overflow:auto;white-space:pre
     }
-    #errors{border-color:rgba(239,68,68,.35); color:#ffe1e1; background:#2a0b0b}
+    #output{flex:1 1 auto;min-height:180px} /* fills remaining space in right panel */
+    #errors{height:120px;border-color:rgba(239,68,68,.35); color:#ffe1e1; background:#2a0b0b}
 
     .hint{color:var(--muted);font-size:13px}
     .pill{display:inline-block;padding:3px 8px;border-radius:999px;border:1px solid var(--border);background:#fff;font-size:12px}
@@ -59,19 +66,21 @@
     <p class="sub">Upload/paste a <b>cropped screenshot of one component</b> (button, card, input). We’ll generate scoped CSS with GPT-5.</p>
 
     <div class="grid">
-      <!-- LEFT -->
-      <section class="card pad">
-        <div class="drop" id="drop">
-          <div><b>Drop an image</b>, click <em>Choose</em>, or paste (Ctrl/Cmd+V).</div>
-          <div class="row" style="justify-content:center;margin-top:8px">
-            <button id="chooseBtn" class="btn small">Choose</button>
-            <button id="pasteBtn" class="btn small">Paste</button>
+      <!-- LEFT: fixed-height panel -->
+      <section class="card panel pad">
+        <div class="grow">
+          <div class="drop" id="drop">
+            <div><b>Drop an image</b>, click <em>Choose</em>, or paste (Ctrl/Cmd+V).</div>
+            <div class="row" style="justify-content:center;margin-top:8px">
+              <button id="chooseBtn" class="btn small">Choose</button>
+              <button id="pasteBtn" class="btn small">Paste</button>
+            </div>
+            <div class="hint" id="sizeHint" style="margin-top:6px">No image selected</div>
+            <input id="file" type="file" accept="image/*" hidden>
           </div>
-          <div class="hint" id="sizeHint" style="margin-top:6px">No image selected</div>
-          <input id="file" type="file" accept="image/*" hidden>
-        </div>
 
-        <img id="preview" alt="Preview"/>
+          <img id="preview" alt="Preview"/>
+        </div>
 
         <div class="row" style="margin-top:12px">
           <div style="flex:1 1 220px">
@@ -96,28 +105,16 @@
         </div>
       </section>
 
-      <!-- RIGHT -->
-      <section class="card pad">
+      <!-- RIGHT: fixed-height panel with internal scrolling -->
+      <section class="card panel pad">
         <div class="bar">
           <span class="label">Final CSS</span>
           <button id="copyFinalBtn" class="btn small">Copy</button>
         </div>
         <pre id="output" class="code" aria-label="Final CSS"></pre>
 
-        <div class="bar" style="margin-top:10px">
-          <span class="label">Draft (first pass)</span>
-          <button id="copyDraftBtn" class="btn small">Copy</button>
-        </div>
-        <pre id="draft" class="code" aria-label="Draft CSS"></pre>
-
-        <div class="bar" style="margin-top:10px"><span class="label">Critique notes</span></div>
-        <pre id="notes" class="code" style="height:160px"></pre>
-
-        <div class="bar" style="margin-top:10px"><span class="label">All versions</span></div>
-        <pre id="versions" class="code" style="height:160px"></pre>
-
-        <div class="bar" style="margin-top:10px"><span class="label">API response / errors</span></div>
-        <pre id="errors" class="code"></pre>
+        <div class="bar"><span class="label">API response / errors</span></div>
+        <pre id="errors" class="code" aria-label="Errors"></pre>
       </section>
     </div>
   </div>
@@ -141,13 +138,8 @@
     const apiStatus = document.getElementById('apiStatus');
 
     const outputEl = document.getElementById('output');
-    const draftEl = document.getElementById('draft');
-    const notesEl = document.getElementById('notes');
-    const versionsEl = document.getElementById('versions');
     const errorsEl = document.getElementById('errors');
-
     const copyFinalBtn = document.getElementById('copyFinalBtn');
-    const copyDraftBtn = document.getElementById('copyDraftBtn');
 
     let dataUrl = "";
 
@@ -195,22 +187,19 @@
       const r = await fetch("/api/generate-css", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image, palette, scope, component }), // single-pass API ignores checks
+        body: JSON.stringify({ image, palette, scope, component }),
       });
 
-      const text = await r.text(); // read raw
+      const text = await r.text(); // raw
       let json = null;
       try { json = JSON.parse(text); } catch {}
 
       if (!r.ok) {
-        const err = new Error(
-          (json && (json.error || json.message)) || text || `HTTP ${r.status}`
-        );
+        const err = new Error((json && (json.error || json.message)) || text || `HTTP ${r.status}`);
         err.status = r.status;
         err.payload = json ?? text;
         throw err;
       }
-
       return json ?? { error: "Malformed JSON from server", raw: text };
     }
 
@@ -223,7 +212,6 @@
     runBtn.addEventListener('click', onRun);
     clearBtn.addEventListener('click', clearAll);
     copyFinalBtn.addEventListener('click', async ()=> { if (!outputEl.textContent) return; try { await navigator.clipboard.writeText(outputEl.textContent); copyFlash(copyFinalBtn); } catch {} });
-    copyDraftBtn.addEventListener('click', async ()=> { if (!draftEl.textContent) return; try { await navigator.clipboard.writeText(draftEl.textContent); copyFlash(copyDraftBtn); } catch {} });
 
     async function onRun(){
       clearOutputs();
@@ -247,16 +235,13 @@
         apiStatus.textContent = "200 OK"; apiStatus.classList.add('ok');
         statusLead.textContent = `Done (${res.passes} passes)`;
 
-        draftEl.textContent = res.draft || "";
         outputEl.textContent = res.css || "";
-        notesEl.textContent = res.notes || "";
-        versionsEl.textContent = (res.versions || []).map((v,i)=>`v${i}:\n${v}`).join("\n\n---\n\n") || "(none)";
 
-        // Show raw model text if CSS is empty to help debug extraction
+        // If CSS came back empty, surface raw model text to debug extraction
         if (!res.css || !res.css.trim()) {
           errorsEl.textContent = `Model raw_out (first 2k):\n` + String(res.raw_out || "").slice(0, 2000);
         } else {
-          errorsEl.textContent = ""; // clear any previous raw_out
+          errorsEl.textContent = ""; // clear
         }
       } catch (err) {
         apiStatus.textContent = String(err.status || 500); apiStatus.classList.add('err');
@@ -274,7 +259,7 @@
     }
 
     function clearOutputs(){
-      outputEl.textContent = ""; draftEl.textContent = ""; notesEl.textContent = ""; versionsEl.textContent = ""; errorsEl.textContent = "";
+      outputEl.textContent = ""; errorsEl.textContent = "";
       apiStatus.textContent = "—"; apiStatus.classList.remove('ok','err'); statusLead.textContent = "";
     }
     function clearAll(){
