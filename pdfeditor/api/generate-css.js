@@ -1,28 +1,13 @@
 // /api/generate-css.js
-// Timeout-safe, component-scoped CSS generator (Responses API).
-// Returns a complete, scoped CSS block. Avoids serverless 504s with a deadline.
+// Single-pass CSS generator for ONE component from an image (Responses API).
+// Returns: { draft, css, versions, passes, palette, notes, scope, component }
 
 import OpenAI from "openai";
 
-// === Tunables / sensible defaults ===
-// Use GPT-5 (override via env). You can also try "gpt-5-mini" for speed.
+// Default model (override with OPENAI_MODEL env if you want, e.g., "gpt-5-mini")
 const MODEL = process.env.OPENAI_MODEL || "gpt-5";
 
-// Max critique→fix loops (hard cap). Default: 2 (fast) — override in env.
-const MAX_CYCLES = Number(process.env.MAX_CYCLES || 2);
-
-// Total time budget for this function in ms (keep under platform timeout).
-// Hobby serverless is ~10s, so we use 9000ms by default.
-const FN_DEADLINE_MS = Number(process.env.FN_DEADLINE_MS || 9000);
-
-// Token budgets (smaller → faster)
-const TOKENS = {
-  draft: 900,
-  critique: 400,
-  fix: 1000,
-  cont: 350,
-};
-
+// Next.js Pages API: we read the body stream ourselves
 export const config = { api: { bodyParser: false } };
 
 export default async function handler(req, res) {
@@ -36,8 +21,6 @@ export default async function handler(req, res) {
     const {
       image,
       palette = [],
-      // caller can ask for more loops, we still clamp to MAX_CYCLES
-      double_checks = 2,
       scope = ".comp",
       component = "component",
     } = data || {};
@@ -45,60 +28,37 @@ export default async function handler(req, res) {
     if (!image || typeof image !== "string" || !image.startsWith("data:image")) {
       return res.status(400).json({
         error:
-          "Bad request: send JSON { image: <data:image/...;base64,>, palette?, double_checks?, scope?, component? } with Content-Type: application/json",
+          "Bad request: send JSON { image: <data:image/...;base64,>, palette?, scope?, component? } with Content-Type: application/json",
       });
     }
     if (!process.env.OPENAI_API_KEY) {
       return res.status(500).json({ error: "OPENAI_API_KEY not configured" });
     }
 
-    // Size guard
+    // Size guard (keep uploads modest for speed)
     const approxBytes = Buffer.byteLength(image, "utf8");
     if (approxBytes > 4.5 * 1024 * 1024) {
       return res.status(413).json({ error: "Image too large. Keep under ~4MB." });
     }
 
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-    const deadline = Date.now() + FN_DEADLINE_MS;
 
-    // ----- DRAFT -----
-    let draft = await passDraft(client, { image, palette, scope, component, deadline });
-    draft = enforceScope(draft, scope);
-    draft = await ensureComplete(client, { css: draft, image, scope, component, deadline });
+    // ---------- SINGLE PASS ----------
+    const cssRaw = await passSingle(client, { image, palette, scope, component });
 
-    const versions = [draft];
-    let css = draft;
-    let lastCritique = "";
+    // Scope guard + light local "completion" if braces are clearly cut off
+    let css = enforceScope(cssRaw, scope);
+    css = closeObviousTruncation(css);
 
-    // ----- CRITIQUE → FIX LOOPS (clamped + deadline-aware) -----
-    const cycles = Math.max(1, Math.min(Number(double_checks) || 1, MAX_CYCLES));
-    for (let i = 1; i <= cycles; i++) {
-      if (timeLeft(deadline) < 1500) break; // not enough time left safely
-
-      lastCritique = await passCritique(client, {
-        image, css, palette, scope, component, cycle: i, total: cycles, deadline
-      });
-
-      if (timeLeft(deadline) < 1500) break;
-
-      let fixed = await passFix(client, {
-        image, css, critique: lastCritique, palette, scope, component, cycle: i, total: cycles, deadline
-      });
-
-      fixed = enforceScope(fixed, scope);
-      fixed = await ensureComplete(client, { css: fixed, image, scope, component, deadline });
-      css = fixed;
-      versions.push(css);
-    }
-
+    // Shape matches your UI (draft == css; versions has only v0)
     res.setHeader("Cache-Control", "no-store");
     return res.status(200).json({
-      draft,
+      draft: css,
       css,
-      versions,
-      passes: 1 + versions.length * 0 + cycles * 2, // cosmetic; draft + (critique/fix)*cycles
+      versions: [css],
+      passes: 1,
       palette,
-      notes: lastCritique,
+      notes: "",
       scope,
       component,
     });
@@ -134,29 +94,8 @@ async function readJson(req) {
   try { return JSON.parse(raw); } catch { throw new Error("Invalid JSON in request body."); }
 }
 
-function timeLeft(deadline) {
-  return Math.max(0, deadline - Date.now());
-}
-
-function abortSignalFor(deadline, minMs = 600) {
-  const ms = Math.max(minMs, timeLeft(deadline));
-  // Node 18+ supports AbortSignal.timeout; fallback to manual controller
-  if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
-    return AbortSignal.timeout(ms);
-  }
-  const ctl = new AbortController();
-  setTimeout(() => ctl.abort(), ms);
-  return ctl.signal;
-}
-
-function between(text, a, b) {
-  const i = text.indexOf(a); if (i === -1) return null;
-  const j = text.indexOf(b, i + a.length); if (j === -1) return null;
-  return text.slice(i + a.length, j);
-}
-
-function cssOnly(s = "") {
-  return String(s).replace(/^```(?:css)?\s*/i, "").replace(/```$/i, "").trim();
+function cssFenceStrip(text = "") {
+  return String(text).replace(/^```(?:css)?\s*/i, "").replace(/```$/i, "").trim();
 }
 
 /** Prefix all non-@ rules (except :root) with the scope class. */
@@ -164,24 +103,31 @@ function enforceScope(inputCss = "", scope = ".comp") {
   let css = String(inputCss || "").trim();
   css = css.replace(/(^|})\s*([^@}{]+?)\s*\{/g, (m, p1, selectors) => {
     const scoped = selectors
-      .split(",").map(s => s.trim())
-      .map(sel => sel.startsWith(scope) || sel.startsWith(":root") || !sel ? sel : `${scope} ${sel}`)
+      .split(",")
+      .map((s) => s.trim())
+      .map((sel) => (!sel || sel.startsWith(scope) || sel.startsWith(":root")) ? sel : `${scope} ${sel}`)
       .join(", ");
     return `${p1} ${scoped} {`;
   });
   return css.trim();
 }
 
-// Detect truncated CSS heuristically
-function needsContinuation(css) {
-  const t = (css || "").trim();
-  if (!t) return true;
-  if (!/\}\s*$/.test(t)) return true;
-  const opens = (t.match(/{/g) || []).length;
-  const closes = (t.match(/}/g) || []).length;
-  if (closes < opens) return true;
-  if (/[,:]\s*$/.test(t)) return true;
-  return false;
+/** If the model stopped in the middle of a block, add closing braces locally (no extra API call). */
+function closeObviousTruncation(css) {
+  let out = String(css || "").trim();
+  if (!out) return out;
+
+  // If it doesn't end with "}" but looks like rules exist, close until counts match
+  const opens = (out.match(/{/g) || []).length;
+  let closes = (out.match(/}/g) || []).length;
+
+  while (closes < opens) {
+    out += "\n}";
+    closes++;
+  }
+  // Avoid dangling comma/colon at the very end
+  out = out.replace(/[,:]\s*$/, "").trim();
+  return out;
 }
 
 /* ===== Responses API glue ===== */
@@ -202,147 +148,50 @@ function extractText(r) {
   return chunks.join("");
 }
 
-async function callResponses(client, { system, userParts, tokens, deadline }) {
-  // If almost out of time, return empty so caller can bail gracefully
-  if (timeLeft(deadline) < 600) return "";
-  const signal = abortSignalFor(deadline, 700);
-
-  const r = await client.responses.create(
-    {
-      model: MODEL,
-      max_output_tokens: tokens,
-      input: [
-        { role: "system", content: [{ type: "input_text", text: system }] },
-        { role: "user",   content: userParts },
-      ],
-    },
-    { signal }
-  );
-
-  return extractText(r) || "";
+function between(text, a, b) {
+  const i = text.indexOf(a); if (i === -1) return null;
+  const j = text.indexOf(b, i + a.length); if (j === -1) return null;
+  return text.slice(i + a.length, j);
 }
 
-/* ================= passes ================= */
+/* ================= single pass ================= */
 
-async function passDraft(client, { image, palette, scope, component, deadline }) {
+async function passSingle(client, { image, palette, scope, component }) {
   const sys =
-    "You are a CSS engine. Return VALID vanilla CSS ONLY (no HTML/Markdown). " +
-    "Input is a PHOTO/CROPPED SCREENSHOT of ONE UI COMPONENT (not a full page). " +
-    "Rules: (1) All selectors scoped under the provided SCOPE CLASS; " +
-    "(2) No global resets/layout; (3) Keep styles minimal and faithful. " +
-    "Wrap the CSS between /*START_CSS*/ and /*END_CSS*/ exactly.";
+    "You are a front-end CSS engine. Output VALID vanilla CSS only (no HTML/Markdown). " +
+    "Input is a PHOTO or CROPPED SCREENSHOT of ONE UI COMPONENT (not a full page). " +
+    "Your job is to reproduce only that component’s styles. " +
+    "HARD RULES: " +
+    "(1) All selectors MUST be under the provided SCOPE CLASS; " +
+    "(2) No global resets/layout/headers/footers; " +
+    "(3) Keep CSS minimal, faithful, and practical; " +
+    "Return the CSS wrapped EXACTLY between /*START_CSS*/ and /*END_CSS*/.";
 
   const usr = [
     `SCOPE CLASS: ${scope}`,
     `COMPONENT TYPE (hint): ${component}`,
-    palette?.length ? `Optional palette tokens: ${palette.join(", ")}` : "No palette tokens.",
-    "Produce CSS for that SINGLE component ONLY.",
-    "Return CSS ONLY, wrapped in the markers."
+    "Study the SINGLE component in the image and output CSS for that component only.",
+    "No body/html/universal selectors. Use the scope for every selector.",
+    palette?.length ? `Optional palette tokens (only if they match): ${palette.join(", ")}` : "No palette tokens required.",
+    "Return CSS ONLY, between the markers.",
   ].join("\n");
 
-  const txt = await callResponses(client, {
-    system: sys,
-    userParts: [
-      { type: "input_text",  text: usr },
-      { type: "input_image", image_url: image },
+  const r = await client.responses.create({
+    model: MODEL,
+    max_output_tokens: 1400,
+    input: [
+      { role: "system", content: [{ type: "input_text", text: sys }] },
+      {
+        role: "user",
+        content: [
+          { type: "input_text", text: usr },
+          { type: "input_image", image_url: image },
+        ],
+      },
     ],
-    tokens: TOKENS.draft,
-    deadline
   });
 
-  const betweenCss = between(txt, "/*START_CSS*/", "/*END_CSS*/");
-  return betweenCss ? betweenCss.trim() : cssOnly(txt);
-}
-
-async function passCritique(client, { image, css, palette, scope, component, cycle, total, deadline }) {
-  const sys =
-    "You are a strict component QA assistant. Do NOT output CSS. " +
-    "Compare the PHOTO of the SINGLE COMPONENT with the CURRENT CSS. " +
-    "List precise mismatches (spacing, radius, borders, colors, size, typography, states). Be terse.";
-
-  const usr = [
-    `Critique ${cycle}/${total}.`,
-    `SCOPE CLASS: ${scope}`,
-    `COMPONENT TYPE (hint): ${component}`,
-    "CURRENT CSS:",
-    "```css", css, "```",
-    palette?.length ? `Palette hint: ${palette.join(", ")}` : ""
-  ].join("\n");
-
-  const txt = await callResponses(client, {
-    system: sys,
-    userParts: [
-      { type: "input_text",  text: usr },
-      { type: "input_image", image_url: image },
-    ],
-    tokens: TOKENS.critique,
-    deadline
-  });
-
-  return String(txt).replace(/```[\s\S]*?```/g, "").trim();
-}
-
-async function passFix(client, { image, css, critique, palette, scope, component, deadline }) {
-  const sys =
-    "Return CSS ONLY, wrapped between /*START_CSS*/ and /*END_CSS*/. " +
-    "Overwrite the stylesheet to address the critique and better match the photo. " +
-    "All selectors must remain under the provided scope. No global/page styles.";
-
-  const usr = [
-    `SCOPE CLASS: ${scope}`,
-    `COMPONENT TYPE (hint): ${component}`,
-    "CRITIQUE:",
-    critique || "(none)",
-    "",
-    "CURRENT CSS:",
-    "```css", css, "```",
-    palette?.length ? `Palette hint: ${palette.join(", ")}` : ""
-  ].join("\n");
-
-  const txt = await callResponses(client, {
-    system: sys,
-    userParts: [
-      { type: "input_text",  text: usr },
-      { type: "input_image", image_url: image },
-    ],
-    tokens: TOKENS.fix,
-    deadline
-  });
-
-  const betweenCss = between(txt, "/*START_CSS*/", "/*END_CSS*/");
-  return betweenCss ? betweenCss.trim() : cssOnly(txt);
-}
-
-async function ensureComplete(client, { css, image, scope, component, deadline }) {
-  if (!needsContinuation(css)) return css;
-
-  const sys =
-    "Continue the CSS EXACTLY where it stopped. Do NOT repeat earlier lines. " +
-    "Return CSS continuation ONLY, between /*START_CSS*/ and /*END_CSS*/. " +
-    "If nothing is missing, return an empty block between the markers.";
-
-  const tail = (css || "").slice(-400);
-  const usr = [
-    `SCOPE CLASS: ${scope}`,
-    `COMPONENT TYPE (hint): ${component}`,
-    "PARTIAL CSS (do not repeat this):",
-    "```css", tail, "```",
-    "Continue from the last property/block until the stylesheet is complete.",
-    "Output only the continuation between the markers."
-  ].join("\n");
-
-  // Single attempt for speed
-  const txt = await callResponses(client, {
-    system: sys,
-    userParts: [
-      { type: "input_text",  text: usr },
-      { type: "input_image", image_url: image },
-    ],
-    tokens: TOKENS.cont,
-    deadline
-  });
-
-  const cont = between(txt, "/*START_CSS*/", "/*END_CSS*/") || cssOnly(txt);
-  const merged = (css + (cont ? "\n" + cont : "")).trim();
-  return needsContinuation(merged) ? css : merged;
+  const raw = extractText(r) || "";
+  const boxed = between(raw, "/*START_CSS*/", "/*END_CSS*/");
+  return (boxed ? boxed : cssFenceStrip(raw)).trim();
 }
