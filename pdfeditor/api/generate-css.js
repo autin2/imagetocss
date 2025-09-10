@@ -1,26 +1,60 @@
 // pages/api/generate-css.js
-// CSS-only, component-scoped generator with optional Critique→Fix cycles.
-// Robust against truncation: model wraps output in /*START_CSS*/ ... /*END_CSS*/,
-// then we extract + auto-repair (balance braces/parens, fix dangling rgba, etc.).
+// Image → CSS API (Next.js / Vercel)
+// -----------------------------------------------------------------------------
+// Goals
+// - Generate VALID, SCOPED, COMPONENT-ONLY CSS from a single component screenshot
+// - Rock-solid output: markers + extraction + auto-repair (dangling rgba, ,;, braces)
+// - Gradient guardrails + client "force_solid" override
+// - GPT-5 → mini → 4.x fallbacks, model probe with >=16 tokens
+// - Rich error details back to client (no opaque 500s)
+// - Input validation + scope sanitization
+//
+// POST JSON:
+// {
+//   image: "data:image/...",
+//   scope?: ".comp",                 // scope/root class for the component
+//   component?: "button" | "card" | "input" | string,
+//   palette?: string[],              // optional tokens (e.g. ["--blue:#3b82f6"])
+//   double_checks?: number,          // critique→fix loops (1..4), default 1 (fast)
+//   force_solid?: boolean,           // client hint: flat background (no gradients)
+//   solid_color?: string,            // suggested hex if flat, e.g. "#3b82f6"
+//   minify?: boolean                 // optional: return minified CSS too
+// }
+//
+// 200 OK Response:
+// {
+//   draft,               // first pass (cleaned & repaired)
+//   css,                 // final pass (or same as draft if no extra cycles)
+//   versions,            // [v0, v1, ...] after each fix cycle
+//   passes,              // 1 + (cycles-1)*2
+//   palette, scope, component, model,
+//   notes: string,       // last critique or flatness note
+//   diagnostics: {       // helpful info about repairs & sanitization
+//     markersFound: boolean,
+//     repairs: string[],
+//     scopeWasSanitized: boolean
+//   },
+//   minified?: string    // if minify=true
+// }
+// -----------------------------------------------------------------------------
 
 export const config = { api: { bodyParser: false } };
 
 import OpenAI from "openai";
 
-// Preferred model first, then fallbacks your account likely has.
+// ---------- Models & token caps ----------
 const MODEL_FALLBACKS = [
-  "gpt-5",        // primary (if available to your project)
+  "gpt-5",        // primary (if your project has access)
   "gpt-5-mini",   // smaller/faster
   "gpt-4.1-mini",
   "gpt-4o-mini"
 ];
-
-// Token caps (Responses API uses max_output_tokens)
 const MAX_TOKENS_DRAFT = 1400;
 const MAX_TOKENS_CRIT  = 800;
 const MAX_TOKENS_FIX   = 1600;
-const PING_TOKENS      = 32; // >= 16 required by API
+const PING_TOKENS      = 32; // >=16 (Responses API minimum)
 
+// ---------- Handler ----------
 export default async function handler(req, res) {
   try {
     if (req.method !== "POST") {
@@ -28,109 +62,133 @@ export default async function handler(req, res) {
       return res.status(405).json({ error: "Method not allowed" });
     }
 
-    // Read raw body
+    // Read raw body (we disabled Next bodyParser above)
     let raw = "";
     for await (const chunk of req) raw += chunk;
 
-    let parsed;
-    try { parsed = JSON.parse(raw || "{}"); }
-    catch (e) { return res.status(400).json({ error: "Invalid JSON body", details: String(e?.message || e) }); }
+    let body;
+    try { body = JSON.parse(raw || "{}"); }
+    catch (e) { return badRequest(res, "Invalid JSON body", e); }
 
     const {
       image,
+      scope: _scope = ".comp",
+      component: _component = "component",
       palette = [],
-      scope = ".comp",
-      component = "component",
-      double_checks = 1,        // default 1 (bounded 1..4)
-      force_solid = false,      // client flatness hint
-      solid_color = ""          // suggested hex when flat
-    } = parsed;
+      double_checks = 1,
+      force_solid = false,
+      solid_color = "",
+      minify = false
+    } = body || {};
 
-    if (!image || typeof image !== "string" || !image.startsWith("data:image")) {
-      return res.status(400).json({
-        error: "Bad request",
-        details: "Send { image: dataUrl, palette?, scope?, component?, double_checks?, force_solid?, solid_color? }"
-      });
+    // --- Validate input ---
+    if (!isDataUrlImage(image)) {
+      return badRequest(
+        res,
+        "Send { image: dataUrl, palette?, scope?, component?, double_checks?, force_solid?, solid_color?, minify? }"
+      );
     }
-
     if (!process.env.OPENAI_API_KEY) {
-      return res.status(500).json({ error: "OPENAI_API_KEY not configured" });
+      return serverErr(res, "OPENAI_API_KEY not configured");
     }
+
+    const scopeSan = sanitizeScope(_scope);
+    const componentSan = String(_component || "component").trim().slice(0, 72) || "component";
+    const cycles = Math.max(1, Math.min(Number(double_checks) || 1, 4));
+
+    const diagnostics = {
+      markersFound: false,
+      repairs: [],
+      scopeWasSanitized: scopeSan !== _scope
+    };
 
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const model = await pickWorkingModel(client, MODEL_FALLBACKS);
 
     // ---------- DRAFT ----------
-    let draftRaw = await passDraft(client, model, {
+    const draftRaw = await passDraft(client, model, {
       image,
       palette: Array.isArray(palette) ? palette : [],
-      scope,
-      component,
+      scope: scopeSan,
+      component: componentSan,
       force_solid: !!force_solid,
       solid_color: String(solid_color || "")
     });
 
-    // Extract between markers and scope, then repair
-    let draft = extractCssWithMarkers(draftRaw) || cssOnly(draftRaw);
-    draft = enforceScope(draft, scope);
-    draft = repairCss(draft);
+    let draft = extractCssWithMarkers(draftRaw);
+    diagnostics.markersFound = draft !== null;
+    if (draft == null) draft = cssOnly(draftRaw); // fallback if model missed markers
+
+    draft = enforceScope(draft, scopeSan);
+    const repairedDraft = repairCss(draft);
+    const draftRepairs = diffRepairs(draft, repairedDraft);
+    diagnostics.repairs.push(...draftRepairs);
+    draft = repairedDraft;
 
     let css = draft;
     const versions = [css];
     let lastCritique = "";
 
-    // If caller marked flat, flatten any gradients that slipped in
+    // Flatten any gradient if client says screenshot is flat
     if (force_solid) {
-      const hex = (String(solid_color || "").match(/^#([0-9a-f]{6}|[0-9a-f]{3})$/i) ? solid_color : null) || "#cccccc";
+      const hex = isHexColor(solid_color) ? solid_color : "#cccccc";
       css = solidifyCss(css, hex);
       versions[0] = css;
     }
 
-    // ---------- Optional Critique→Fix (bounded 1..4) ----------
-    const cycles = Math.max(1, Math.min(Number(double_checks) || 1, 4));
+    // ---------- Optional Critique → Fix ----------
     for (let i = 1; i <= cycles - 1; i++) {
       lastCritique = await passCritique(client, model, {
-        image, css, palette, scope, component, force_solid
+        image, css, palette, scope: scopeSan, component: componentSan, force_solid
       });
 
-      let fixedRaw = await passFix(client, model, {
-        image, css, critique: lastCritique, palette, scope, component, force_solid, solid_color
+      // FIX
+      const fixedRaw = await passFix(client, model, {
+        image, css, critique: lastCritique, palette, scope: scopeSan, component: componentSan, force_solid, solid_color
       });
 
-      let fixed = extractCssWithMarkers(fixedRaw) || cssOnly(fixedRaw);
-      fixed = enforceScope(fixed, scope);
-      fixed = repairCss(fixed);
+      let fixed = extractCssWithMarkers(fixedRaw);
+      if (fixed == null) fixed = cssOnly(fixedRaw);
+
+      fixed = enforceScope(fixed, scopeSan);
+      const repairedFixed = repairCss(fixed);
+      const fixRepairs = diffRepairs(fixed, repairedFixed);
+      diagnostics.repairs.push(...fixRepairs);
 
       if (force_solid) {
-        const hex = (String(solid_color || "").match(/^#([0-9a-f]{6}|[0-9a-f]{3})$/i) ? solid_color : null) || "#cccccc";
-        fixed = solidifyCss(fixed, hex);
+        const hex = isHexColor(solid_color) ? solid_color : "#cccccc";
+        fixed = solidifyCss(repairedFixed, hex);
+      } else {
+        fixed = repairedFixed;
       }
 
       css = fixed;
       versions.push(css);
     }
 
-    res.setHeader("Cache-Control", "no-store");
-    return res.status(200).json({
+    const out = {
       draft,
       css,
       versions,
       passes: 1 + Math.max(0, cycles - 1) * 2,
       palette,
-      notes: force_solid ? "Flatness detected → gradients/gloss avoided." : lastCritique || "",
-      scope,
-      component,
-      model
-    });
+      notes: force_solid ? "Flatness detected → gradients/gloss avoided." : (lastCritique || ""),
+      scope: scopeSan,
+      component: componentSan,
+      model,
+      diagnostics
+    };
+
+    if (minify) out.minified = minifyCss(css);
+
+    res.setHeader("Cache-Control", "no-store");
+    return res.status(200).json(out);
 
   } catch (err) {
+    // Surface useful details
     console.error("generate-css error:", err);
     const status = Number(err?.status || err?.code || 500);
-    const details =
-      err?.error?.message ||
-      err?.message ||
-      (typeof err === "string" ? err : "") ||
-      "Unknown error";
+    const details = err?.error?.message || err?.message || "Unknown error";
     const extra = safeStringify(err?.response?.data || err?.data || err?.cause || null);
     return res.status(status >= 400 && status < 600 ? status : 500).json({
       error: "Failed to generate CSS.",
@@ -140,41 +198,57 @@ export default async function handler(req, res) {
   }
 }
 
-/* ================= helpers ================= */
-
+// ---------- Small helpers ----------
+function badRequest(res, msg, e) {
+  return res.status(400).json({ error: "Bad request", details: msg, extra: e ? String(e?.message || e) : undefined });
+}
+function serverErr(res, msg) {
+  return res.status(500).json({ error: msg });
+}
 function safeStringify(x) { try { return x ? JSON.stringify(x, null, 2) : undefined; } catch { return String(x); } }
+
+function isDataUrlImage(s) {
+  return typeof s === "string" && /^data:image\/(png|jpe?g|webp|gif|bmp|x-icon);base64,/.test(s);
+}
+function isHexColor(s) {
+  return typeof s === "string" && /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(s.trim());
+}
+function sanitizeScope(s) {
+  let v = String(s || ".comp").trim();
+  if (!v.startsWith(".")) v = "." + v;
+  // allow letters, numbers, dash, underscore; single class only
+  v = v.replace(/[^a-z0-9\-_]/gi, "");
+  if (!v) v = ".comp";
+  if (!v.startsWith(".")) v = "." + v;
+  return v;
+}
 
 function cssOnly(text = "") {
   return String(text).replace(/^```(?:css)?\s*/i, "").replace(/```$/i, "").trim();
 }
-function textOnly(s = "") { return String(s).replace(/```[\s\S]*?```/g, "").trim(); }
 
-/** Extract CSS between /*START_CSS*\/ and /*END_CSS*\/ markers. */
+/** Extract CSS strictly between markers; return null if missing. */
 function extractCssWithMarkers(s = "") {
   const m = String(s).match(/\/\*START_CSS\*\/([\s\S]*?)\/\*END_CSS\*\//);
-  return m ? m[1].trim() : "";
+  return m ? m[1].trim() : null;
 }
 
-/** Remove markers if they leaked into the CSS (e.g., inside a selector). */
-function stripMarkersEverywhere(s = "") {
-  return String(s).replace(/\/\*START_CSS\*\/|\/\*END_CSS\*\//g, "");
-}
-
-/** Prefix top-level selectors with the scope (except :root/@rules). */
+/** Prefix top-level selectors with the scope (except :root and @rules). */
 function enforceScope(inputCss = "", scope = ".comp") {
   let css = inputCss.trim();
+  // do not duplicate if already scoped
   css = css.replace(/(^|})\s*([^@}{]+?)\s*\{/g, (m, p1, selectors) => {
     const scoped = selectors
       .split(",")
-      .map((s) => s.trim())
-      .map((sel) => (!sel || sel.startsWith(scope) || sel.startsWith(":root") ? sel : `${scope} ${sel}`))
+      .map(s => s.trim())
+      .map(sel => (!sel || sel.startsWith(scope) || sel.startsWith(":root")) ? sel : `${scope} ${sel}`)
       .join(", ");
     return `${p1} ${scoped} {`;
   });
   return css.trim();
 }
 
-/** Flatten any gradients to a solid color & drop glossy ::after overlays. */
+/** Replace gradients with a solid color & drop glossy ::after overlays */
 function solidifyCss(css = "", hex = "#cccccc") {
   const solid = `background-color: ${hex};`;
   return css
@@ -186,14 +260,14 @@ function solidifyCss(css = "", hex = "#cccccc") {
     });
 }
 
-/** Attempt to repair common truncations: markers, unbalanced braces/parens, dangling rgba(, ,; punctuation, missing semicolons. */
+/** Attempt to repair common truncations & glitches and return fixed CSS. */
 function repairCss(css = "") {
   let out = css;
 
-  // 0) Nuke any START/END markers if they leaked into the sheet
-  out = stripMarkersEverywhere(out);
+  // 0) Remove stray markers if they leaked in
+  out = out.replace(/\/\*START_CSS\*\/|\/\*END_CSS\*\//g, "");
 
-  // 1) Finish dangling rgba( … ) if present
+  // 1) Finish dangling rgba(
   out = out.replace(/rgba\(\s*([^)]+)?$/i, (m, inside) => {
     const parts = (inside || "").split(",").map(s => s.trim()).filter(Boolean);
     while (parts.length < 4) parts.push(parts.length < 3 ? "0" : "0.2");
@@ -201,54 +275,61 @@ function repairCss(css = "") {
     return `rgba(${num(r)}, ${num(g)}, ${num(b)}, ${num(a)})`;
   });
 
-  // 2) Fix 'box-shadow:' / 'text-shadow:' lines that lack a semicolon at EOL
+  // 2) Ensure shadow lines end with semicolons
   out = out.replace(/(box-shadow|text-shadow)\s*:[^;{}]+(?=\n|$)/gi, (m) => m + ";");
 
-  // 3) Replace ',;' → ';'
+  // 3) Replace ",;" → ";"
   out = out.replace(/,\s*;/g, ";");
 
-  // 4) Balance parentheses and braces
+  // 4) Balance parentheses & braces
   out = balanceParens(out);
   out = balanceBraces(out);
 
-  // 5) Ensure each rule ends with a semicolon before closing brace
+  // 5) Ensure declarations end with semicolon before }
   out = out.replace(/([^;{}\s])\s*}/g, "$1; }");
+
+  // 6) Remove truly empty rule blocks (e.g., ".x:active { }")
+  out = out.replace(/(^|})\s*([^{]+)\{\s*}\s*/g, "$1");
 
   return out.trim();
 }
+function num(v){ const n=parseFloat(String(v).replace(/[^\d.]/g,"")); return Number.isFinite(n)?n:0; }
+function balanceParens(s=""){ let open=0,res=""; for(const ch of s){ if(ch==="(")open++; if(ch===")")open=Math.max(0,open-1); res+=ch; } while(open-- >0) res+=")"; return res; }
+function balanceBraces(s=""){ const opens=(s.match(/{/g)||[]).length, closes=(s.match(/}/g)||[]).length; let out=s; for(let i=0;i<opens-closes;i++) out+="\n}"; return out; }
 
-function num(v){
-  const n = parseFloat(String(v).replace(/[^\d.]/g, ""));
-  return Number.isFinite(n) ? n : 0;
+/** Very light minifier (keeps readability reasonable) */
+function minifyCss(css="") {
+  return css
+    .replace(/\/\*[^*]*\*+([^/*][^*]*\*+)*\//g,"") // comments
+    .replace(/\s*([{}:;,])\s+/g,"$1")
+    .replace(/\s{2,}/g," ")
+    .replace(/;}/g,"}")
+    .trim();
 }
 
-function balanceParens(s=""){
-  let open = 0; let res = "";
-  for (const ch of s) {
-    if (ch === "(") open++;
-    if (ch === ")") open = Math.max(0, open - 1);
-    res += ch;
-  }
-  while (open-- > 0) res += ")";
-  return res;
+/** Explain what repairs we applied (for diagnostics) */
+function diffRepairs(before, after) {
+  const notes = [];
+  if (/\/\*START_CSS\*\/|\/\*END_CSS\*\//.test(before) && !/\/\*START_CSS\*\/|\/\*END_CSS\*\//.test(after))
+    notes.push("Removed stray START/END markers from CSS.");
+  if (/,;/.test(before) && !/,;/.test(after))
+    notes.push("Fixed ',;' punctuation.");
+  if (/rgba\(\s*[^)]*$/.test(before) && !/rgba\(\s*[^)]*$/.test(after))
+    notes.push("Completed dangling rgba(...).");
+  const bOpen=(before.match(/{/g)||[]).length, bClose=(before.match(/}/g)||[]).length;
+  const aOpen=(after.match(/{/g)||[]).length, aClose=(after.match(/}/g)||[]).length;
+  if (bOpen !== bClose && aOpen === aClose) notes.push("Balanced unmatched braces.");
+  return notes;
 }
 
-function balanceBraces(s=""){
-  const opens = (s.match(/{/g) || []).length;
-  const closes = (s.match(/}/g) || []).length;
-  let out = s;
-  for (let i = 0; i < opens - closes; i++) out += "\n}";
-  return out;
-}
-
-/* ======== model picking with graceful fallback ======== */
+// ---------- Model fallback probing ----------
 async function pickWorkingModel(client, candidates) {
   let lastErr;
   for (const m of candidates) {
     try {
       const ping = await client.responses.create({
         model: m,
-        input: [ { role: "user", content: [ { type: "input_text", text: "ping" } ] } ],
+        input: [{ role: "user", content: [{ type: "input_text", text: "ping" }] }],
         max_output_tokens: PING_TOKENS
       });
       if (ping?.output_text !== undefined) return m;
@@ -256,14 +337,13 @@ async function pickWorkingModel(client, candidates) {
       lastErr = e;
       const msg = (e?.message || "").toLowerCase();
       if (msg.includes("does not exist") || msg.includes("you do not have access")) continue;
-      throw e;
+      throw e; // quota/key/etc.
     }
   }
   throw lastErr || new Error("No working model from fallback list");
 }
 
-/* ================= model passes (Responses API) ================= */
-
+// ---------- Prompts ----------
 function draftSystemPrompt() {
   return [
     "You are a front-end CSS engine. Output VALID vanilla CSS only (no HTML/Markdown).",
@@ -283,17 +363,33 @@ function draftSystemPrompt() {
     "/*END_CSS*/"
   ].join("\n");
 }
+function fixSystemPrompt() {
+  return [
+    "Return CSS only (no HTML/Markdown). Overwrite the stylesheet to resolve the critique and better match the SINGLE component.",
+    "All selectors must remain under the provided scope.",
+    "No global selectors or page-level structures.",
+    "Gradient rule:",
+    "- Only use gradients if they are visually present in the screenshot.",
+    "- If caller indicates flat, use a single background-color (no gloss).",
+    "",
+    "MANDATORY OUTPUT FORMAT:",
+    "Return CSS ONLY wrapped EXACTLY like:",
+    "/*START_CSS*/",
+    "<your CSS here>",
+    "/*END_CSS*/"
+  ].join("\n");
+}
 
+// ---------- Model passes (Responses API) ----------
 async function passDraft(client, model, { image, palette, scope, component, force_solid, solid_color }) {
   const sys = draftSystemPrompt();
-
   const guard = force_solid
     ? [
         "",
         "The caller indicated the screenshot is flat:",
         "- Use a single background-color only.",
         "- Do NOT use gradients or glossy overlays.",
-        solid_color ? `- Prefer this background-color if it matches: ${solid_color}` : ""
+        isHexColor(solid_color) ? `- Prefer this background-color if it matches: ${solid_color}` : ""
       ].join("\n")
     : "";
 
@@ -315,13 +411,14 @@ async function passDraft(client, model, { image, palette, scope, component, forc
       role: "user",
       content: [
         { type: "input_text", text: usr },
-        { type: "input_image", image_url: image }
+        { type: "input_image", image_url: image } // data URL accepted
       ]
     }],
     max_output_tokens: MAX_TOKENS_DRAFT
   });
 
-  return r?.output_text || "";
+  // Prefer output_text aggregator; fallback to raw stitching if needed
+  return r?.output_text ?? stitchOutput(r);
 }
 
 async function passCritique(client, model, { image, css, palette, scope, component, force_solid }) {
@@ -361,36 +458,18 @@ async function passCritique(client, model, { image, css, palette, scope, compone
     max_output_tokens: MAX_TOKENS_CRIT
   });
 
-  return textOnly(r?.output_text || "");
-}
-
-function fixSystemPrompt() {
-  return [
-    "Return CSS only (no HTML/Markdown). Overwrite the stylesheet to resolve the critique and better match the SINGLE component.",
-    "All selectors must remain under the provided scope.",
-    "No global selectors or page-level structures.",
-    "Gradient rule:",
-    "- Only use gradients if they are visually present in the screenshot.",
-    "- If caller indicates flat, use a single background-color (no gloss).",
-    "",
-    "MANDATORY OUTPUT FORMAT:",
-    "Return CSS ONLY wrapped EXACTLY like:",
-    "/*START_CSS*/",
-    "<your CSS here>",
-    "/*END_CSS*/"
-  ].join("\n");
+  return r?.output_text ?? stitchOutput(r);
 }
 
 async function passFix(client, model, { image, css, critique, palette, scope, component, force_solid, solid_color }) {
   const sys = fixSystemPrompt();
-
   const guard = force_solid
     ? [
         "",
         "Caller indicated the screenshot is flat →",
         "- Use a single background-color.",
         "- Do NOT use gradients or glossy overlays.",
-        solid_color ? `- Prefer: ${solid_color}` : ""
+        isHexColor(solid_color) ? `- Prefer: ${solid_color}` : ""
       ].join("\n")
     : "";
 
@@ -422,5 +501,25 @@ async function passFix(client, model, { image, css, critique, palette, scope, co
     max_output_tokens: MAX_TOKENS_FIX
   });
 
-  return r?.output_text || css;
+  return r?.output_text ?? stitchOutput(r);
+}
+
+/** Fallback in case output_text is missing; stitch 'output' parts into text. */
+function stitchOutput(resp) {
+  try {
+    const parts = resp?.output || [];
+    return parts
+      .map(p => {
+        if (p?.content && Array.isArray(p.content)) {
+          return p.content
+            .map(c => typeof c.text === "string" ? c.text : (typeof c?.[0]?.text === "string" ? c[0].text : ""))
+            .join("");
+        }
+        return "";
+      })
+      .join("")
+      .trim();
+  } catch {
+    return "";
+  }
 }
