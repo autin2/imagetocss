@@ -19,7 +19,8 @@
 //   double_checks?: number,   // critique→fix loops (1..4), default 1 (fast)
 //   force_solid?: boolean,    // client hint: flat background (no gradients)
 //   solid_color?: string,     // suggested hex if flat, e.g. "#3b82f6"
-//   minify?: boolean          // optional: return minified CSS too
+//   minify?: boolean,         // optional: return minified CSS too
+//   debug?: boolean           // if true, include raw_out_preview text
 // }
 //
 // 200 OK Response:
@@ -35,7 +36,8 @@
 //     repairs: string[],
 //     scopeWasSanitized: boolean
 //   },
-//   minified?: string
+//   minified?: string,
+//   raw_out_preview?: string  // concatenated stage previews when debug:true
 // }
 // -----------------------------------------------------------------------------
 
@@ -79,14 +81,15 @@ export default async function handler(req, res) {
       double_checks = 1,
       force_solid = false,
       solid_color = "",
-      minify = false
+      minify = false,
+      debug = false
     } = body || {};
 
     // --- Validate input ---
     if (!isDataUrlImage(image)) {
       return badRequest(
         res,
-        "Send { image: dataUrl, palette?, scope?, component?, double_checks?, force_solid?, solid_color?, minify? }"
+        "Send { image: dataUrl, palette?, scope?, component?, double_checks?, force_solid?, solid_color?, minify?, debug? }"
       );
     }
     if (!process.env.OPENAI_API_KEY) {
@@ -107,7 +110,7 @@ export default async function handler(req, res) {
     const model = await pickWorkingModel(client, MODEL_FALLBACKS);
 
     // ---------- DRAFT ----------
-    const draftRaw = await passDraft(client, model, {
+    const draftRun = await passDraft(client, model, {
       image,
       palette: Array.isArray(palette) ? palette : [],
       scope: scopeSan,
@@ -116,9 +119,12 @@ export default async function handler(req, res) {
       solid_color: String(solid_color || "")
     });
 
-    let draft = extractCssWithMarkers(draftRaw);
+    const raws = [];
+    if (debug) raws.push({ stage: "draft", raw: String(draftRun.raw || "").slice(0, 2000) });
+
+    let draft = extractCssWithMarkers(draftRun.text);
     diagnostics.markersFound = draft !== null;
-    if (draft == null) draft = cssOnly(draftRaw); // fallback if model missed markers
+    if (draft == null) draft = cssOnly(draftRun.text); // fallback if model missed markers
 
     draft = enforceScope(draft, scopeSan);
     const repairedDraft = repairCss(draft);
@@ -139,22 +145,26 @@ export default async function handler(req, res) {
 
     // ---------- Optional Critique → Fix ----------
     for (let i = 1; i <= cycles - 1; i++) {
-      lastCritique = await passCritique(client, model, {
+      const critRun = await passCritique(client, model, {
         image, css, palette, scope: scopeSan, component: componentSan, force_solid
       });
+      if (debug) raws.push({ stage: `crit_${i}`, raw: String(critRun.raw || "").slice(0, 2000) });
+
+      lastCritique = textOnly(critRun.text || "");
 
       // FIX
-      const fixedRaw = await passFix(client, model, {
+      const fixRun = await passFix(client, model, {
         image, css, critique: lastCritique, palette, scope: scopeSan, component: componentSan, force_solid, solid_color
       });
+      if (debug) raws.push({ stage: `fix_${i}`, raw: String(fixRun.raw || "").slice(0, 2000) });
 
-      let fixed = extractCssWithMarkers(fixedRaw);
-      if (fixed == null) fixed = cssOnly(fixedRaw);
+      let fixed = extractCssWithMarkers(fixRun.text);
+      if (fixed == null) fixed = cssOnly(fixRun.text);
 
       fixed = enforceScope(fixed, scopeSan);
       const repairedFixed = repairCss(fixed);
       const fixRepairs = diffRepairs(fixed, repairedFixed);
-      diagnostics.repairs.push(...fixRepairs);
+      diagnostics.repairs.push(...(fixRepairs || []));
 
       if (force_solid) {
         const hex = isHexColor(solid_color) ? solid_color : "#cccccc";
@@ -181,6 +191,11 @@ export default async function handler(req, res) {
     };
 
     if (minify) out.minified = minifyCss(css);
+    if (debug) {
+      out.raw_out_preview = raws
+        .map(r => `=== ${r.stage.toUpperCase()} ===\n${r.raw}`)
+        .join("\n\n");
+    }
 
     res.setHeader("Cache-Control", "no-store");
     return res.status(200).json(out);
@@ -226,6 +241,9 @@ function sanitizeScope(s) {
 
 function cssOnly(text = "") {
   return String(text).replace(/^```(?:css)?\s*/i, "").replace(/```$/i, "").trim();
+}
+function textOnly(s = "") {
+  return String(s).replace(/```[\s\S]*?```/g, "").trim();
 }
 
 /** Extract CSS strictly between markers; return null if missing. */
@@ -461,7 +479,7 @@ async function passDraft(client, model, { image, palette, scope, component, forc
     "IMPORTANT: Wrap your CSS between /*START_CSS*/ and /*END_CSS*/ with nothing else outside."
   ].join("\n");
 
-  const r = await client.responses.create({
+  const resp = await client.responses.create({
     model,
     instructions: sys,
     input: [{
@@ -474,8 +492,7 @@ async function passDraft(client, model, { image, palette, scope, component, forc
     max_output_tokens: MAX_TOKENS_DRAFT
   });
 
-  // Prefer output_text; fallback to stitched output if needed
-  return r?.output_text ?? stitchOutput(r);
+  return respToStrings(resp); // { text, raw }
 }
 
 async function passCritique(client, model, { image, css, palette, scope, component, force_solid }) {
@@ -502,7 +519,7 @@ async function passCritique(client, model, { image, css, palette, scope, compone
     guard
   ].join("\n");
 
-  const r = await client.responses.create({
+  const resp = await client.responses.create({
     model,
     instructions: sys,
     input: [{
@@ -515,7 +532,7 @@ async function passCritique(client, model, { image, css, palette, scope, compone
     max_output_tokens: MAX_TOKENS_CRIT
   });
 
-  return r?.output_text ?? stitchOutput(r);
+  return respToStrings(resp); // { text, raw }
 }
 
 async function passFix(client, model, { image, css, critique, palette, scope, component, force_solid, solid_color }) {
@@ -545,7 +562,7 @@ async function passFix(client, model, { image, css, critique, palette, scope, co
     "IMPORTANT: Wrap your CSS between /*START_CSS*/ and /*END_CSS*/ with nothing else outside."
   ].join("\n");
 
-  const r = await client.responses.create({
+  const resp = await client.responses.create({
     model,
     instructions: sys,
     input: [{
@@ -558,7 +575,18 @@ async function passFix(client, model, { image, css, critique, palette, scope, co
     max_output_tokens: MAX_TOKENS_FIX
   });
 
-  return r?.output_text ?? stitchOutput(r);
+  return respToStrings(resp); // { text, raw }
+}
+
+/** Prefer output_text; otherwise stitch 'output' parts into text + return raw */
+function respToStrings(resp) {
+  // stitched tries to join any parts into a single text
+  const stitched = stitchOutput(resp);
+  const text = (typeof resp?.output_text === "string" && resp.output_text.trim().length)
+    ? resp.output_text
+    : stitched;
+  const raw = stitched || resp?.output_text || "";
+  return { text, raw };
 }
 
 /** Fallback in case output_text is missing; stitch 'output' parts into text. */
@@ -569,7 +597,8 @@ function stitchOutput(resp) {
       .map(p => {
         if (p?.content && Array.isArray(p.content)) {
           return p.content
-            .map(c => typeof c.text === "string" ? c.text : (typeof c?.[0]?.text === "string" ? c[0].text : ""))
+            .map(c => (typeof c.text === "string" ? c.text :
+                       (Array.isArray(c) && typeof c?.[0]?.text === "string" ? c[0].text : "")))
             .join("");
         }
         return "";
