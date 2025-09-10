@@ -69,7 +69,7 @@ h1{font-size:38px;line-height:1.15;margin:6px 0 10px}
 .snip-frame{position:relative;border:2px dashed var(--border);border-radius:12px;padding:12px;background:#fff}
 .snip-frame::before{
   content:"✂";position:absolute;top:-12px;left:-12px;width:24px;height:24px;border-radius:999px;
-  background:#fff;border:1px solid var(--border);display:grid;place-items:center;font-size:12px;color:var(--muted);
+  background:#fff;border:1px solid var(--border);display:grid;place-items:center;font-size:12px;color:#muted;
   box-shadow:0 1px 6px rgba(0,0,0,.05);
 }
 /* Drag highlight */
@@ -95,9 +95,9 @@ h1{font-size:38px;line-height:1.15;margin:6px 0 10px}
 /* Map generated tokens to the demo (so the card reflects :root variables) */
 .token-card{
   --d-bg: var(--paper);
-  --d-ink: var(--color-2, #0f172a);      /* text color */
-  --d-accent: var(--color-1, #0ea5e9);   /* button/bg accent */
-  --d-border: var(--color-3, #e5e7eb);   /* border highlight */
+  --d-ink: var(--color-2, #0f172a);
+  --d-accent: var(--color-1, #0ea5e9);
+  --d-border: var(--color-3, #e5e7eb);
 }
 
 /* Code block */
@@ -142,7 +142,7 @@ h1{font-size:38px;line-height:1.15;margin:6px 0 10px}
 /* App-specific additions */
 /* ===================== */
 
-/* Fixed app columns: left 360px, right fills; prevent content from growing grid width */
+/* Fixed app columns; prevent content from growing grid width */
 .app-grid{ display:grid; grid-template-columns:360px minmax(0,1fr); gap:20px; align-items:start; }
 @media (max-width:980px){ .app-grid{ grid-template-columns:1fr } }
 
@@ -161,7 +161,7 @@ h1{font-size:38px;line-height:1.15;margin:6px 0 10px}
 
 /* Hover overlay to change the photo (only when image selected) */
 .overlay{
-  position:absolute; inset:12px; /* respect snip-frame padding and radius */
+  position:absolute; inset:12px;
   display:grid; place-items:center;
   background:rgba(2,6,23,.45);
   border-radius:inherit;
@@ -173,6 +173,17 @@ h1{font-size:38px;line-height:1.15;margin:6px 0 10px}
 
 /* Code area: never expand grid width; scroll long lines */
 .code{ max-width:100%; overflow-x:auto; }
+
+/* Controls row & API pill (ensures aligned height with buttons) */
+.controls{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+.controls .spacer{ flex:1 1 auto; min-width:16px; }
+.api-pill{
+  display:inline-flex; align-items:center; gap:6px;
+  min-height:40px; padding:0 12px;
+  border-radius:999px; background:#e6f6fd; border:1px solid #c8e9f8;
+  color:#0b3b4f; font-weight:700;
+}
+.api-pill b{ font-weight:800; }
 
 /* ================== */
 /* Global loading UI  */
@@ -192,7 +203,6 @@ h1{font-size:38px;line-height:1.15;margin:6px 0 10px}
 }
 .loading-title{ font-weight:800; }
 .loading-sub{ font-size:12px; color:var(--muted); }
-
 .spinner{
   width:24px; height:24px; border-radius:999px;
   border:3px solid #e5e7eb; border-top-color: var(--accent);
