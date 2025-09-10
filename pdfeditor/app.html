@@ -17,7 +17,7 @@
     h1{margin:0 0 6px;font-size:30px;letter-spacing:-.02em}
     .sub{margin:0 0 14px;color:var(--muted)}
 
-    /* >>> Fixed columns: left 360px, right fills. Prevent growth from content. */
+    /* Fixed columns: left 360px, right fills. Prevent growth from content. */
     .grid{
       display:grid;
       grid-template-columns: 360px minmax(0,1fr);
@@ -32,11 +32,11 @@
     .card{
       background:var(--paper);border:1px solid var(--border);
       border-radius:var(--radius);box-shadow:var(--shadow);
-      min-width:0; /* <-- allow item to shrink within grid track */
+      min-width:0; /* allow item to shrink within grid track */
     }
     .panel{
       height:var(--panelH);display:flex;flex-direction:column;
-      min-width:0; /* <-- absolutely key so long code doesn't expand the column */
+      min-width:0; /* prevent long code from expanding the column */
     }
     .pad{padding:16px}
     .grow{flex:1 1 auto;min-height:0}
@@ -63,13 +63,16 @@
     .drop .empty{text-align:center}
     .drop .empty .row{justify-content:center;margin-top:8px}
     .drop .hint{margin-top:6px;font-size:13px;color:var(--muted)}
+
+    /* Image inside the box */
     #preview{display:none;max-width:100%;max-height:100%;object-fit:contain;border-radius:10px}
     .drop.has-image #preview{display:block}
     .drop.has-image .empty{display:none}
 
+    /* Hover overlay ONLY when image is selected */
     .overlay{
       position:absolute;inset:0;display:grid;place-items:center;background:rgba(2,6,23,.45);
-      opacity:0;pointer-events:none;transition:opacity .15s ease;border-radius:inherit;
+      opacity:0;pointer-events:none;transition:opacity .15s ease;border-radius:inherit;z-index:2;
     }
     .drop.has-image:hover .overlay,
     .drop.has-image:focus-within .overlay{opacity:1;pointer-events:auto}
@@ -86,7 +89,7 @@
       overflow-x:auto;               /* horizontal scroll for long lines */
       white-space:pre;               /* keep CSS formatting */
       max-width:100%;                /* don't overflow grid track */
-      contain: content;              /* isolate layout/paint; extra safety */
+      contain: content;              /* isolate layout/paint */
     }
     #output{flex:1 1 auto;min-height:180px}
     #errors{height:120px;border-color:rgba(239,68,68,.35); color:#ffe1e1; background:#2a0b0b}
@@ -161,7 +164,6 @@
     // ----- Elements -----
     const fileEl = document.getElementById('file');
     const dropEl = document.getElementById('drop');
-    const emptyUi = document.getElementById('emptyUi');
     const chooseBtn = document.getElementById('chooseBtn');
     const pasteBtn = document.getElementById('pasteBtn');
     const changeBtn = document.getElementById('changeBtn');
@@ -185,7 +187,9 @@
 
     // ----- DnD / Choose / Paste -----
     chooseBtn.addEventListener('click', () => fileEl.click());
-    changeBtn.addEventListener('click', () => fileEl.click());
+    changeBtn.addEventListener('click', () => fileEl.click()); // overlay action
+
+    // Click anywhere on the box when empty → open file dialog
     dropEl.addEventListener('click', (e) => {
       if (!dropEl.classList.contains('has-image') && e.target === dropEl) fileEl.click();
     });
@@ -212,6 +216,7 @@
       if (it) readFile(it.getAsFile());
     });
 
+    // Keyboard: Enter/Space on empty drop opens file dialog
     dropEl.addEventListener('keydown', (e)=>{
       if (!dropEl.classList.contains('has-image') && (e.key === 'Enter' || e.key === ' ')) {
         e.preventDefault(); fileEl.click();
@@ -245,24 +250,29 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ image, palette, scope, component }),
       });
-      const text = await r.text(); let json = null;
+
+      const text = await r.text(); // raw
+      let json = null;
       try { json = JSON.parse(text); } catch {}
+
       if (!r.ok) {
         const err = new Error((json && (json.error || json.message)) || text || `HTTP ${r.status}`);
-        err.status = r.status; err.payload = json ?? text; throw err;
+        err.status = r.status;
+        err.payload = json ?? text;
+        throw err;
       }
       return json ?? { error: "Malformed JSON from server", raw: text };
     }
 
-    function fmt(x){ if (typeof x === "string") return x; try{ return JSON.stringify(x,null,2);}catch{ return String(x);} }
+    function fmt(x) {
+      if (typeof x === "string") return x;
+      try { return JSON.stringify(x, null, 2); } catch { return String(x); }
+    }
 
     // ----- Actions -----
     runBtn.addEventListener('click', onRun);
     clearBtn.addEventListener('click', () => { clearOutputs(); clearImage(); });
-    copyFinalBtn.addEventListener('click', async ()=> {
-      if (!outputEl.textContent) return;
-      try { await navigator.clipboard.writeText(outputEl.textContent); copyFlash(copyFinalBtn); } catch {}
-    });
+    copyFinalBtn.addEventListener('click', async ()=> { if (!outputEl.textContent) return; try { await navigator.clipboard.writeText(outputEl.textContent); copyFlash(copyFinalBtn); } catch {} });
 
     async function onRun(){
       clearOutputs();
@@ -276,16 +286,22 @@
         runBtn.disabled = true;
         statusLead.textContent = "Generating…"; apiStatus.textContent = "…"; apiStatus.classList.remove('err','ok');
 
-        const res = await generateCSS({ image: dataUrl, palette: pal, scope: scopeEl.value || ".comp", component: componentEl.value || "component" });
+        const res = await generateCSS({
+          image: dataUrl,
+          palette: pal,
+          scope: scopeEl.value || ".comp",
+          component: componentEl.value || "component"
+        });
 
         apiStatus.textContent = "200 OK"; apiStatus.classList.add('ok');
         statusLead.textContent = `Done (${res.passes} passes)`;
 
         outputEl.textContent = res.css || "";
+
         if (!res.css || !res.css.trim()) {
           errorsEl.textContent = `Model raw_out (first 2k):\n` + String(res.raw_out || "").slice(0, 2000);
         } else {
-          errorsEl.textContent = "";
+          errorsEl.textContent = ""; // clear
         }
       } catch (err) {
         apiStatus.textContent = String(err.status || 500); apiStatus.classList.add('err');
@@ -307,11 +323,6 @@
       apiStatus.textContent = "—"; apiStatus.classList.remove('ok','err'); statusLead.textContent = "";
     }
     function copyFlash(btn){ const prev=btn.textContent; btn.textContent="Copied!"; setTimeout(()=>btn.textContent=prev, 900); }
-
-    // Status badge (unchanged API label)
-    const apiStatus = document.getElementById('apiStatus') || (function(){const s=document.createElement('span');return s})();
   </script>
-  <!-- Hidden badge display kept for compatibility -->
-  <span id="apiStatus" style="display:none"></span>
 </body>
 </html>
