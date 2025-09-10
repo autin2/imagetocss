@@ -54,11 +54,12 @@
           </div>
         </div>
 
-        <div style="display:flex; align-items:center; gap:10px; margin-top:12px">
+        <!-- Controls row (fixed heights, no weird wrapping) -->
+        <div class="controls" style="margin-top:12px">
           <button id="runBtn" class="btn primary">Generate CSS</button>
           <button id="clearBtn" class="btn">Clear</button>
-          <span class="lead" id="statusLead" style="margin-left:auto;font-size:13px;color:var(--muted)"></span>
-          <span class="kicker" style="margin-left:8px">API: <b id="apiStatus">—</b></span>
+          <span id="statusLead" class="lead spacer" style="font-size:13px;color:var(--muted)"></span>
+          <span class="api-pill">API: <b id="apiStatus">—</b></span>
         </div>
       </section>
 
@@ -126,7 +127,6 @@
     chooseBtn.addEventListener('click', () => fileEl.click());
     changeBtn.addEventListener('click', () => fileEl.click());
 
-    // Click anywhere on the frame when empty → open file dialog
     dropEl.addEventListener('click', (e) => {
       if (!dropEl.classList.contains('has-image') && e.target === dropEl) fileEl.click();
     });
