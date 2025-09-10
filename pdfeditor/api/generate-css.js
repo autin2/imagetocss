@@ -4,11 +4,11 @@
 
 import OpenAI from "openai";
 
-// Use GPT-5 by default; allow override
+// Use GPT-5 by default; allow override via env for quick tests (e.g., gpt-5-mini)
 const MODEL = process.env.OPENAI_MODEL || "gpt-5";
 
-// If you're on Next.js Pages API, disable the built-in bodyParser
-// (we'll read the stream ourselves, but also support req.body if present)
+// If you're on Next.js Pages API, disable the built-in body parser.
+// We read the stream ourselves but also support req.body when present.
 export const config = {
   api: {
     bodyParser: false,
@@ -27,12 +27,12 @@ export default async function handler(req, res) {
     const {
       image,
       palette = [],
-      double_checks = 6,
+      double_checks = 6,       // 1–8 critique/fix cycles
       scope = ".comp",
       component = "component",
     } = data || {};
 
-    // ---- Quick guards ----
+    // ---- Guards (return 4xx on client mistakes) ----
     if (!image || typeof image !== "string" || !image.startsWith("data:image")) {
       return res.status(400).json({
         error:
@@ -43,14 +43,12 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: "OPENAI_API_KEY not configured" });
     }
 
-    // ---- Optional size guard (rough check on payload size) ----
+    // Size guard (keep serverless happy). Adjust if needed.
     const approxBytes = Buffer.byteLength(image, "utf8");
-    // Tweak as needed; keep it conservative for serverless
     const MAX_BYTES = 4.5 * 1024 * 1024; // ~4.5MB
     if (approxBytes > MAX_BYTES) {
       return res.status(413).json({
-        error:
-          "Image too large. Try a tighter crop or compress the screenshot (target < ~4MB).",
+        error: "Image too large. Crop tighter or compress (< ~4MB).",
       });
     }
 
@@ -67,23 +65,10 @@ export default async function handler(req, res) {
     const cycles = Math.max(1, Math.min(Number(double_checks) || 1, 8));
     for (let i = 1; i <= cycles; i++) {
       lastCritique = await passCritique(client, {
-        image,
-        css,
-        palette,
-        scope,
-        component,
-        cycle: i,
-        total: cycles,
+        image, css, palette, scope, component, cycle: i, total: cycles
       });
       let fixed = await passFix(client, {
-        image,
-        css,
-        critique: lastCritique,
-        palette,
-        scope,
-        component,
-        cycle: i,
-        total: cycles,
+        image, css, critique: lastCritique, palette, scope, component, cycle: i, total: cycles
       });
       fixed = enforceScope(fixed, scope);
       css = fixed;
@@ -95,27 +80,22 @@ export default async function handler(req, res) {
       draft,
       css,
       versions,
-      passes: 1 + cycles * 2,
+      passes: 1 + cycles * 2, // 1 draft + (critique+fix)*cycles
       palette,
       notes: lastCritique,
       scope,
       component,
     });
   } catch (err) {
-    // Surface real error details
     const status =
       err?.status ||
       err?.statusCode ||
       err?.response?.status ||
       (String(err?.message || "").includes("JSON body") ? 400 : 500);
 
-    // Log full details
     console.error("[/api/generate-css] Error:", err?.message || err);
-    if (err?.response?.data) {
-      console.error("[openai-error-data]", err.response.data);
-    }
+    if (err?.response?.data) console.error("[openai-error-data]", err.response.data);
 
-    // Return a helpful payload
     return res.status(status).json({
       error: err?.message || "Failed to generate CSS.",
       details: err?.response?.data || undefined,
@@ -126,22 +106,17 @@ export default async function handler(req, res) {
 /* ================= helpers ================= */
 
 async function readJson(req) {
-  // If another middleware already parsed JSON:
+  // If already parsed by some middleware:
   if (req.body && typeof req.body === "object") return req.body;
 
-  // Validate Content-Type when possible
-  const ct = (req.headers["content-type"] || "").toLowerCase();
-  if (!ct.includes("application/json")) {
-    // We still try to parse, but warn via error if it fails
-  }
-
+  // We still try to parse even if Content-Type is missing/mismatched.
   let raw = "";
   for await (const chunk of req) raw += chunk;
   if (!raw) throw new Error("JSON body required but request body was empty.");
 
   try {
     return JSON.parse(raw);
-  } catch (e) {
+  } catch {
     throw new Error("Invalid JSON in request body.");
   }
 }
@@ -180,6 +155,7 @@ function enforceScope(inputCss = "", scope = ".comp") {
 /* ================= model passes ================= */
 
 async function passDraft(client, { image, palette, scope, component }) {
+  // Emphasize: photo/cropped screenshot of ONE component — never full page
   const sys =
     "You are a front-end CSS engine. Output VALID vanilla CSS only (no HTML/Markdown). " +
     "Input is a PHOTO or CROPPED SCREENSHOT of ONE UI COMPONENT (not a full page). " +
