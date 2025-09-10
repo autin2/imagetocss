@@ -1,6 +1,6 @@
 // pages/api/generate-css.js
 // CSS-only, component-scoped generator with optional Critique→Fix cycles.
-// Robust against truncation: model must wrap output in /*START_CSS*/ ... /*END_CSS*/,
+// Robust against truncation: model wraps output in /*START_CSS*/ ... /*END_CSS*/,
 // then we extract + auto-repair (balance braces/parens, fix dangling rgba, etc.).
 
 export const config = { api: { bodyParser: false } };
@@ -19,7 +19,7 @@ const MODEL_FALLBACKS = [
 const MAX_TOKENS_DRAFT = 1400;
 const MAX_TOKENS_CRIT  = 800;
 const MAX_TOKENS_FIX   = 1600;
-const PING_TOKENS      = 32; // >=16 required
+const PING_TOKENS      = 32; // >= 16 required by API
 
 export default async function handler(req, res) {
   try {
@@ -70,8 +70,9 @@ export default async function handler(req, res) {
       solid_color: String(solid_color || "")
     });
 
-    // Extract between markers and scope
-    let draft = enforceScope(extractCssWithMarkers(draftRaw) || cssOnly(draftRaw), scope);
+    // Extract between markers and scope, then repair
+    let draft = extractCssWithMarkers(draftRaw) || cssOnly(draftRaw);
+    draft = enforceScope(draft, scope);
     draft = repairCss(draft);
 
     let css = draft;
@@ -96,7 +97,8 @@ export default async function handler(req, res) {
         image, css, critique: lastCritique, palette, scope, component, force_solid, solid_color
       });
 
-      let fixed = enforceScope(extractCssWithMarkers(fixedRaw) || cssOnly(fixedRaw), scope);
+      let fixed = extractCssWithMarkers(fixedRaw) || cssOnly(fixedRaw);
+      fixed = enforceScope(fixed, scope);
       fixed = repairCss(fixed);
 
       if (force_solid) {
@@ -153,6 +155,11 @@ function extractCssWithMarkers(s = "") {
   return m ? m[1].trim() : "";
 }
 
+/** Remove markers if they leaked into the CSS (e.g., inside a selector). */
+function stripMarkersEverywhere(s = "") {
+  return String(s).replace(/\/\*START_CSS\*\/|\/\*END_CSS\*\//g, "");
+}
+
 /** Prefix top-level selectors with the scope (except :root/@rules). */
 function enforceScope(inputCss = "", scope = ".comp") {
   let css = inputCss.trim();
@@ -179,27 +186,33 @@ function solidifyCss(css = "", hex = "#cccccc") {
     });
 }
 
-/** Attempt to repair common truncations: unbalanced braces/parens, dangling rgba(, missing semicolons. */
+/** Attempt to repair common truncations: markers, unbalanced braces/parens, dangling rgba(, ,; punctuation, missing semicolons. */
 function repairCss(css = "") {
   let out = css;
 
-  // 1) Finish dangling rgba( … → if ends without ')', try to complete to rgba(0,0,0,0.2)
+  // 0) Nuke any START/END markers if they leaked into the sheet
+  out = stripMarkersEverywhere(out);
+
+  // 1) Finish dangling rgba( … ) if present
   out = out.replace(/rgba\(\s*([^)]+)?$/i, (m, inside) => {
-    // If it looks like "rgba(" or "rgba(255,255,255, 0.3" without ')'
     const parts = (inside || "").split(",").map(s => s.trim()).filter(Boolean);
     while (parts.length < 4) parts.push(parts.length < 3 ? "0" : "0.2");
     const [r,g,b,a] = parts.slice(0,4);
     return `rgba(${num(r)}, ${num(g)}, ${num(b)}, ${num(a)})`;
   });
 
-  // 2) Ensure each box-shadow / text-shadow line ends with a semicolon
+  // 2) Fix 'box-shadow:' / 'text-shadow:' lines that lack a semicolon at EOL
   out = out.replace(/(box-shadow|text-shadow)\s*:[^;{}]+(?=\n|$)/gi, (m) => m + ";");
 
-  // 3) Balance parentheses
-  out = balanceParens(out);
+  // 3) Replace ',;' → ';'
+  out = out.replace(/,\s*;/g, ";");
 
-  // 4) Ensure every rule has a closing `}`
+  // 4) Balance parentheses and braces
+  out = balanceParens(out);
   out = balanceBraces(out);
+
+  // 5) Ensure each rule ends with a semicolon before closing brace
+  out = out.replace(/([^;{}\s])\s*}/g, "$1; }");
 
   return out.trim();
 }
@@ -221,7 +234,6 @@ function balanceParens(s=""){
 }
 
 function balanceBraces(s=""){
-  // Very simple: add a closing brace if we have more '{' than '}'.
   const opens = (s.match(/{/g) || []).length;
   const closes = (s.match(/}/g) || []).length;
   let out = s;
@@ -312,23 +324,6 @@ async function passDraft(client, model, { image, palette, scope, component, forc
   return r?.output_text || "";
 }
 
-function fixSystemPrompt() {
-  return [
-    "Return CSS only (no HTML/Markdown). Overwrite the stylesheet to resolve the critique and better match the SINGLE component.",
-    "All selectors must remain under the provided scope.",
-    "No global selectors or page-level structures.",
-    "Gradient rule:",
-    "- Only use gradients if they are visually present in the screenshot.",
-    "- If caller indicates flat, use a single background-color (no gloss).",
-    "",
-    "MANDATORY OUTPUT FORMAT:",
-    "Return CSS ONLY wrapped EXACTLY like:",
-    "/*START_CSS*/",
-    "<your CSS here>",
-    "/*END_CSS*/"
-  ].join("\n");
-}
-
 async function passCritique(client, model, { image, css, palette, scope, component, force_solid }) {
   const sys = [
     "You are a strict component QA assistant. Output plain text (no CSS).",
@@ -367,6 +362,23 @@ async function passCritique(client, model, { image, css, palette, scope, compone
   });
 
   return textOnly(r?.output_text || "");
+}
+
+function fixSystemPrompt() {
+  return [
+    "Return CSS only (no HTML/Markdown). Overwrite the stylesheet to resolve the critique and better match the SINGLE component.",
+    "All selectors must remain under the provided scope.",
+    "No global selectors or page-level structures.",
+    "Gradient rule:",
+    "- Only use gradients if they are visually present in the screenshot.",
+    "- If caller indicates flat, use a single background-color (no gloss).",
+    "",
+    "MANDATORY OUTPUT FORMAT:",
+    "Return CSS ONLY wrapped EXACTLY like:",
+    "/*START_CSS*/",
+    "<your CSS here>",
+    "/*END_CSS*/"
+  ].join("\n");
 }
 
 async function passFix(client, model, { image, css, critique, palette, scope, component, force_solid, solid_color }) {
