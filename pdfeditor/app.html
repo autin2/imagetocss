@@ -1,4 +1,3 @@
-<!-- Save as: app.html -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -10,22 +9,35 @@
       --bg:#f7f9fc; --ink:#0f172a; --muted:#64748b; --paper:#ffffff; --border:#e5e7eb;
       --accent:#0ea5e9; --accent-ink:#06222c; --ok:#16a34a; --err:#ef4444;
       --radius:14px; --shadow:0 8px 24px rgba(2,6,23,.06);
-      --panelH: 560px;  /* fixed panel height so the left side doesn't resize */
-      --dash:#d8dee6;
+      --panelH:560px; --dash:#d8dee6;
     }
     *{box-sizing:border-box}
     body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,Arial}
-    .wrap{max-width:1000px;margin:28px auto;padding:0 18px}
+    .wrap{max-width:1100px;margin:28px auto;padding:0 18px}
     h1{margin:0 0 6px;font-size:30px;letter-spacing:-.02em}
     .sub{margin:0 0 14px;color:var(--muted)}
-    .grid{display:grid;grid-template-columns:1.05fr .95fr;gap:20px;align-items:start}
+
+    /* >>> Fixed columns: left 360px, right fills. Prevent growth from content. */
+    .grid{
+      display:grid;
+      grid-template-columns: 360px minmax(0,1fr);
+      gap:20px;
+      align-items:start;
+    }
     @media (max-width:980px){
       .grid{grid-template-columns:1fr}
-      :root{ --panelH: auto; }
+      :root{ --panelH:auto; }
     }
 
-    .card{background:var(--paper);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow)}
-    .panel{height:var(--panelH);display:flex;flex-direction:column}
+    .card{
+      background:var(--paper);border:1px solid var(--border);
+      border-radius:var(--radius);box-shadow:var(--shadow);
+      min-width:0; /* <-- allow item to shrink within grid track */
+    }
+    .panel{
+      height:var(--panelH);display:flex;flex-direction:column;
+      min-width:0; /* <-- absolutely key so long code doesn't expand the column */
+    }
     .pad{padding:16px}
     .grow{flex:1 1 auto;min-height:0}
 
@@ -41,56 +53,40 @@
     .btn.small{padding:8px 10px;font-size:13px}
     .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
 
-    /* Select image box (fills the whole grow area) */
+    /* Select image box fills the whole left panel area */
     .drop{
-      position:relative;
-      height:100%;
-      border:2px dashed var(--dash);
-      border-radius:12px;
-      color:var(--muted);
-      background:#fff;
-      display:grid;
-      place-items:center;
-      padding:14px;
-      overflow:hidden;
+      position:relative;height:100%;border:2px dashed var(--dash);border-radius:12px;color:var(--muted);
+      background:#fff;display:grid;place-items:center;padding:14px;overflow:hidden;
       transition:border-color .2s, background .2s;
     }
     .drop.drag{border-color:var(--accent);background:#f0fbff}
     .drop .empty{text-align:center}
     .drop .empty .row{justify-content:center;margin-top:8px}
     .drop .hint{margin-top:6px;font-size:13px;color:var(--muted)}
-
-    /* The image lives INSIDE the box */
-    #preview{
-      display:none;        /* shown when has-image */
-      max-width:100%;
-      max-height:100%;
-      object-fit:contain;
-      border-radius:10px;
-    }
+    #preview{display:none;max-width:100%;max-height:100%;object-fit:contain;border-radius:10px}
     .drop.has-image #preview{display:block}
     .drop.has-image .empty{display:none}
 
-    /* Hover overlay ONLY when image is selected */
     .overlay{
-      position:absolute; inset:0;
-      display:grid; place-items:center;
-      background:rgba(2,6,23,.45);
-      opacity:0; pointer-events:none;
-      transition:opacity .15s ease;
-      border-radius:inherit;
+      position:absolute;inset:0;display:grid;place-items:center;background:rgba(2,6,23,.45);
+      opacity:0;pointer-events:none;transition:opacity .15s ease;border-radius:inherit;
     }
     .drop.has-image:hover .overlay,
-    .drop.has-image:focus-within .overlay{ opacity:1; pointer-events:auto; }
+    .drop.has-image:focus-within .overlay{opacity:1;pointer-events:auto}
     .overlay .btn{box-shadow:0 2px 10px rgba(0,0,0,.2)}
     .overlay .btn.primary{background:#0ea5e9;color:#06222c;border-color:transparent}
 
-    /* Right: code & errors */
+    /* Right: code & errors — never expand grid width */
     .bar{display:flex;align-items:center;justify-content:space-between;margin:6px 0}
     .bar .label{color:var(--muted);font-size:13px}
     pre.code{
       background:#0a0c10;color:#e5e7eb;font:13px/1.45 ui-monospace, Menlo, Consolas, monospace;
-      border-radius:10px;border:1px solid #1f2937;padding:12px;overflow:auto;white-space:pre
+      border-radius:10px;border:1px solid #1f2937;padding:12px;
+      overflow:auto;                 /* scroll instead of resize */
+      overflow-x:auto;               /* horizontal scroll for long lines */
+      white-space:pre;               /* keep CSS formatting */
+      max-width:100%;                /* don't overflow grid track */
+      contain: content;              /* isolate layout/paint; extra safety */
     }
     #output{flex:1 1 auto;min-height:180px}
     #errors{height:120px;border-color:rgba(239,68,68,.35); color:#ffe1e1; background:#2a0b0b}
@@ -106,11 +102,10 @@
     <p class="sub">Upload/paste a <b>cropped screenshot of one component</b> (button, card, input). We’ll generate scoped CSS with GPT-5.</p>
 
     <div class="grid">
-      <!-- LEFT: fixed-height panel -->
+      <!-- LEFT: fixed-height, fixed-width panel -->
       <section class="card panel pad">
         <div class="grow">
           <div class="drop" id="drop" tabindex="0" aria-label="Drop or choose an image">
-            <!-- Empty state (shown until an image is selected) -->
             <div id="emptyUi" class="empty">
               <div><b>Drop an image</b>, click <em>Choose</em>, or paste (Ctrl/Cmd+V).</div>
               <div class="row">
@@ -119,16 +114,8 @@
               </div>
               <div class="hint" id="sizeHint">No image selected</div>
             </div>
-
-            <!-- Image lives inside the dashed box -->
             <img id="preview" alt="Selected image preview"/>
-
-            <!-- Hover overlay (only when image is selected) -->
-            <div class="overlay" id="overlay">
-              <button id="changeBtn" class="btn primary">Change photo</button>
-            </div>
-
-            <!-- hidden input -->
+            <div class="overlay" id="overlay"><button id="changeBtn" class="btn primary">Change photo</button></div>
             <input id="file" type="file" accept="image/*" hidden>
           </div>
         </div>
@@ -198,8 +185,7 @@
 
     // ----- DnD / Choose / Paste -----
     chooseBtn.addEventListener('click', () => fileEl.click());
-    changeBtn.addEventListener('click', () => fileEl.click()); // overlay action
-    // Click anywhere on the box when empty → open file dialog
+    changeBtn.addEventListener('click', () => fileEl.click());
     dropEl.addEventListener('click', (e) => {
       if (!dropEl.classList.contains('has-image') && e.target === dropEl) fileEl.click();
     });
@@ -226,7 +212,6 @@
       if (it) readFile(it.getAsFile());
     });
 
-    // Keyboard: Enter/Space on empty drop opens file dialog
     dropEl.addEventListener('keydown', (e)=>{
       if (!dropEl.classList.contains('has-image') && (e.key === 'Enter' || e.key === ' ')) {
         e.preventDefault(); fileEl.click();
@@ -246,9 +231,7 @@
     }
 
     function clearImage(){
-      dataUrl = "";
-      preview.src = "";
-      dropEl.classList.remove('has-image');
+      dataUrl = ""; preview.src = ""; dropEl.classList.remove('has-image');
       sizeHint.textContent = "No image selected";
     }
 
@@ -262,29 +245,24 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ image, palette, scope, component }),
       });
-
-      const text = await r.text();
-      let json = null;
+      const text = await r.text(); let json = null;
       try { json = JSON.parse(text); } catch {}
-
       if (!r.ok) {
         const err = new Error((json && (json.error || json.message)) || text || `HTTP ${r.status}`);
-        err.status = r.status;
-        err.payload = json ?? text;
-        throw err;
+        err.status = r.status; err.payload = json ?? text; throw err;
       }
       return json ?? { error: "Malformed JSON from server", raw: text };
     }
 
-    function fmt(x) {
-      if (typeof x === "string") return x;
-      try { return JSON.stringify(x, null, 2); } catch { return String(x); }
-    }
+    function fmt(x){ if (typeof x === "string") return x; try{ return JSON.stringify(x,null,2);}catch{ return String(x);} }
 
     // ----- Actions -----
     runBtn.addEventListener('click', onRun);
     clearBtn.addEventListener('click', () => { clearOutputs(); clearImage(); });
-    copyFinalBtn.addEventListener('click', async ()=> { if (!outputEl.textContent) return; try { await navigator.clipboard.writeText(outputEl.textContent); copyFlash(copyFinalBtn); } catch {} });
+    copyFinalBtn.addEventListener('click', async ()=> {
+      if (!outputEl.textContent) return;
+      try { await navigator.clipboard.writeText(outputEl.textContent); copyFlash(copyFinalBtn); } catch {}
+    });
 
     async function onRun(){
       clearOutputs();
@@ -298,18 +276,12 @@
         runBtn.disabled = true;
         statusLead.textContent = "Generating…"; apiStatus.textContent = "…"; apiStatus.classList.remove('err','ok');
 
-        const res = await generateCSS({
-          image: dataUrl,
-          palette: pal,
-          scope: scopeEl.value || ".comp",
-          component: componentEl.value || "component"
-        });
+        const res = await generateCSS({ image: dataUrl, palette: pal, scope: scopeEl.value || ".comp", component: componentEl.value || "component" });
 
         apiStatus.textContent = "200 OK"; apiStatus.classList.add('ok');
         statusLead.textContent = `Done (${res.passes} passes)`;
 
         outputEl.textContent = res.css || "";
-
         if (!res.css || !res.css.trim()) {
           errorsEl.textContent = `Model raw_out (first 2k):\n` + String(res.raw_out || "").slice(0, 2000);
         } else {
@@ -335,6 +307,11 @@
       apiStatus.textContent = "—"; apiStatus.classList.remove('ok','err'); statusLead.textContent = "";
     }
     function copyFlash(btn){ const prev=btn.textContent; btn.textContent="Copied!"; setTimeout(()=>btn.textContent=prev, 900); }
+
+    // Status badge (unchanged API label)
+    const apiStatus = document.getElementById('apiStatus') || (function(){const s=document.createElement('span');return s})();
   </script>
+  <!-- Hidden badge display kept for compatibility -->
+  <span id="apiStatus" style="display:none"></span>
 </body>
 </html>
