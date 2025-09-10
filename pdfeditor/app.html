@@ -177,12 +177,53 @@
     function formatBytes(n){ if (!n && n!==0) return "0 KB"; const u=['B','KB','MB','GB']; let i=0; while(n>=1024 && i<u.length-1){n/=1024;i++} return `${n.toFixed(i?1:0)} ${u[i]}`; }
     function flash(msg){ sizeHint.textContent = msg; setTimeout(()=> sizeHint.textContent = sizeHint.textContent || msg, 1400); }
 
+    // ----- Quick flatness detection (top vs bottom) -----
+    async function isFlatImage(imgEl, threshold = 12) {
+      const cnv = document.createElement('canvas');
+      const ctx = cnv.getContext('2d', { willReadFrequently: true });
+      cnv.width = imgEl.naturalWidth; cnv.height = imgEl.naturalHeight;
+      ctx.drawImage(imgEl, 0, 0);
+      const h = cnv.height, w = cnv.width;
+      const x0 = Math.floor(w * 0.25), x1 = Math.floor(w * 0.75);
+
+      function avgRowRange(y0, y1) {
+        const hgt = Math.max(1, y1 - y0);
+        const img = ctx.getImageData(x0, y0, x1 - x0, hgt).data;
+        let r=0,g=0,b=0,count=0;
+        for (let i=0;i<img.length;i+=4){ r+=img[i]; g+=img[i+1]; b+=img[i+2]; count++; }
+        return [r/count, g/count, b/count];
+      }
+      const top = avgRowRange(0, Math.floor(h*0.25));
+      const bot = avgRowRange(Math.floor(h*0.75), h);
+      const dist = Math.hypot(top[0]-bot[0], top[1]-bot[1], top[2]-bot[2]);
+      return { flat: dist < threshold, top, bot };
+    }
+
+    function rgbToHex([r,g,b]){
+      const to = (n)=>Math.max(0,Math.min(255,Math.round(n))).toString(16).padStart(2,"0");
+      return `#${to(r)}${to(g)}${to(b)}`;
+    }
+    function meanRGB(a,b){ return [(a[0]+b[0])/2,(a[1]+b[1])/2,(a[2]+b[2])/2]; }
+
+    function solidifyCss(css, hexColor) {
+      const solid = `background-color: ${hexColor};`;
+      return css
+        .replace(/background\s*:\s*[^;]*gradient\([^;]*\)\s*;?/gi, solid)
+        .replace(/background-image\s*:\s*[^;]*gradient\([^;]*\)\s*;?/gi, "background-image: none;")
+        .replace(/::after\s*\{[^}]*\}/gi, (block) => {
+          if (/background[^;]*gradient/i.test(block) || /rgba\([^)]*,\s*[^)]*,\s*[^)]*,\s*0(\.\d+)?\)/i.test(block)) {
+            return "";
+          }
+          return block;
+        });
+    }
+
     // ----- API helper (safe text → JSON) -----
-    async function generateCSS({ image, scope = ".comp", component = "button" }) {
+    async function generateCSS({ image, scope = ".comp", component = "button", force_solid = false, solid_color = "" }) {
       const r = await fetch("/api/generate-css", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image, palette: [], scope, component }), // palette removed → send []
+        body: JSON.stringify({ image, palette: [], scope, component, force_solid, solid_color }),
       });
 
       const text = await r.text();
@@ -218,20 +259,33 @@
       try {
         runBtn.disabled = true;
         setLoading(true);
-        statusLead.textContent = "Generating…";
+        statusLead.textContent = "Analyzing…";
         apiStatus.textContent = "…"; apiStatus.style.color = "";
 
+        // Flatness check + color
+        const { flat, top, bot } = await isFlatImage(preview, 12);
+        const avgHex = rgbToHex(meanRGB(top, bot));
+
+        statusLead.textContent = flat ? "Flat background detected" : "Gradient-like variation detected";
         const res = await generateCSS({
           image: dataUrl,
           scope: scopeEl.value || ".comp",
-          component: componentEl.value || "component"
+          component: componentEl.value || "component",
+          force_solid: flat,
+          solid_color: avgHex
         });
 
         apiStatus.textContent = "200 OK"; apiStatus.style.color = "#16a34a";
-        statusLead.textContent = `Done (${res.passes} passes)`;
-        outputEl.textContent = res.css || "";
+        statusLead.textContent = `Done (${res.passes} pass${res.passes===1?"":"es"})`;
 
-        if (!res.css || !res.css.trim()) {
+        let finalCss = res.css || "";
+        // Safety: if we forced solid, strip any gradient that slipped through
+        if (flat && /gradient\(/i.test(finalCss)) {
+          finalCss = solidifyCss(finalCss, avgHex);
+        }
+        outputEl.textContent = finalCss;
+
+        if (!finalCss.trim()) {
           errorsEl.textContent = `Model raw_out (first 2k):\n` + String(res.raw_out || "").slice(0, 2000);
         } else {
           errorsEl.textContent = "";
