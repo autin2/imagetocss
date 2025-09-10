@@ -4,6 +4,7 @@
 // Goals
 // - Generate VALID, SCOPED, COMPONENT-ONLY CSS from a single component screenshot
 // - Rock-solid output: markers + extraction + auto-repair (dangling rgba, ,;, braces)
+// - Remove stray selector tokens (e.g., a bare ".comp" line)
 // - Auto-merge broken multi-line box-shadow/text-shadow declarations
 // - Gradient guardrails + client "force_solid" override
 // - GPT-5 → mini → 4.x fallbacks, model probe with >=16 tokens
@@ -25,19 +26,9 @@
 //
 // 200 OK Response:
 // {
-//   draft,               // first pass (cleaned & repaired)
-//   css,                 // final pass (or same as draft if no extra cycles)
-//   versions,            // [v0, v1, ...] after each fix cycle
-//   passes,              // 1 + (cycles-1)*2
-//   palette, scope, component, model,
-//   notes: string,       // last critique or flatness note
-//   diagnostics: {       // helpful info about repairs & sanitization
-//     markersFound: boolean,
-//     repairs: string[],
-//     scopeWasSanitized: boolean
-//   },
-//   minified?: string,
-//   raw_out_preview?: string  // concatenated stage previews when debug:true
+//   draft, css, versions, passes, palette, scope, component, model,
+//   notes, diagnostics:{ markersFound, repairs[], scopeWasSanitized },
+//   minified?, raw_out_preview? (when debug:true)
 // }
 // -----------------------------------------------------------------------------
 
@@ -127,6 +118,10 @@ export default async function handler(req, res) {
     if (draft == null) draft = cssOnly(draftRun.text); // fallback if model missed markers
 
     draft = enforceScope(draft, scopeSan);
+
+    // NEW: strip stray selector tokens before we do other repairs
+    draft = dropStraySelectors(draft);
+
     const repairedDraft = repairCss(draft);
     const draftRepairs = diffRepairs(draft, repairedDraft);
     diagnostics.repairs.push(...draftRepairs);
@@ -162,6 +157,10 @@ export default async function handler(req, res) {
       if (fixed == null) fixed = cssOnly(fixRun.text);
 
       fixed = enforceScope(fixed, scopeSan);
+
+      // NEW: strip stray selector tokens again (fix pass can reintroduce)
+      fixed = dropStraySelectors(fixed);
+
       const repairedFixed = repairCss(fixed);
       const fixRepairs = diffRepairs(fixed, repairedFixed);
       diagnostics.repairs.push(...(fixRepairs || []));
@@ -278,12 +277,23 @@ function solidifyCss(css = "", hex = "#cccccc") {
     });
 }
 
+/** Remove standalone selector tokens (lines w/ no `{`, `}`, or `:`). */
+function dropStraySelectors(css = "") {
+  // Remove lines that look like selectors but are not followed by a rule block or declaration
+  // Avoid @-rules, keyframe steps, 'from'/'to', and comment lines.
+  const re = /^[ \t]*(?!@)(?!\d+%)(?!from\b)(?!to\b)(?!\/\*)(?!\*)[^:{}\n]+?[ \t]*$/gm;
+  return css.replace(re, "").replace(/\n{2,}/g, "\n").trim();
+}
+
 /** Attempt to repair common truncations & glitches and return fixed CSS. */
 function repairCss(css = "") {
   let out = css;
 
   // 0) Remove stray markers if they leaked in
   out = out.replace(/\/\*START_CSS\*\/|\/\*END_CSS\*\//g, "");
+
+  // 0b) Remove stray selector tokens (again, in case)
+  out = dropStraySelectors(out);
 
   // 1) Finish dangling rgba(
   out = out.replace(/rgba\(\s*([^)]+)?$/i, (m, inside) => {
@@ -336,7 +346,7 @@ function mergeShadowFragments(css = "", prop = "box-shadow") {
     prev = out;
     out = out.replace(re, (_m, head, a, b) => {
       const left = a.trim().replace(/,\s*$/,"");   // strip trailing comma
-      const right = b.trim().replace(/^,\s*/,"");  // strip leading comma
+      const right = b.trim().replace/^,\s*/,"");   // strip leading comma
       return `${head}${left}, ${right};`;
     });
   } while (out !== prev);
@@ -394,6 +404,13 @@ function diffRepairs(before, after) {
   const bOpen=(before.match(/{/g)||[]).length, bClose=(before.match(/}/g)||[]).length;
   const aOpen=(after.match(/{/g)||[]).length, aClose=(after.match(/}/g)||[]).length;
   if (bOpen !== bClose && aOpen === aClose) notes.push("Balanced unmatched braces.");
+
+  // detect stray selector removal
+  if (/^[ \t]*(?!@)(?!\d+%)(?!from\b)(?!to\b)(?!\/\*)(?!\*)[^:{}\n]+?[ \t]*$/m.test(before) &&
+      !/^[ \t]*(?!@)(?!\d+%)(?!from\b)(?!to\b)(?!\/\*)(?!\*)[^:{}\n]+?[ \t]*$/m.test(after)) {
+    notes.push("Removed stray selector tokens.");
+  }
+
   return notes;
 }
 
@@ -580,7 +597,6 @@ async function passFix(client, model, { image, css, critique, palette, scope, co
 
 /** Prefer output_text; otherwise stitch 'output' parts into text + return raw */
 function respToStrings(resp) {
-  // stitched tries to join any parts into a single text
   const stitched = stitchOutput(resp);
   const text = (typeof resp?.output_text === "string" && resp.output_text.trim().length)
     ? resp.output_text
