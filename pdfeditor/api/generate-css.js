@@ -4,13 +4,11 @@
 
 import OpenAI from "openai";
 
-// Use GPT-5 by default; allow override via env (e.g., gpt-5-mini)
+// Default model; override with OPENAI_MODEL if you want (e.g., gpt-5-mini)
 const MODEL = process.env.OPENAI_MODEL || "gpt-5";
 
 // If using Next.js Pages API
-export const config = {
-  api: { bodyParser: false },
-};
+export const config = { api: { bodyParser: false } };
 
 export default async function handler(req, res) {
   try {
@@ -23,7 +21,7 @@ export default async function handler(req, res) {
     const {
       image,
       palette = [],
-      double_checks = 6,   // 1–8
+      double_checks = 6,      // 1–8
       scope = ".comp",
       component = "component",
     } = data || {};
@@ -38,7 +36,7 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: "OPENAI_API_KEY not configured" });
     }
 
-    // size guard
+    // Size guard (tweak to your runtime’s limits)
     const approxBytes = Buffer.byteLength(image, "utf8");
     const MAX_BYTES = 4.5 * 1024 * 1024;
     if (approxBytes > MAX_BYTES) {
@@ -47,14 +45,14 @@ export default async function handler(req, res) {
 
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-    // ----- DRAFT -----
+    // ---------- DRAFT ----------
     let draft = await passDraft(client, { image, palette, scope, component });
     draft = enforceScope(draft, scope);
     const versions = [draft];
     let css = draft;
     let lastCritique = "";
 
-    // ----- CRITIQUE → FIX LOOPS -----
+    // ---------- CRITIQUE → FIX LOOPS ----------
     const cycles = Math.max(1, Math.min(Number(double_checks) || 1, 8));
     for (let i = 1; i <= cycles; i++) {
       lastCritique = await passCritique(client, { image, css, palette, scope, component, cycle: i, total: cycles });
@@ -66,13 +64,20 @@ export default async function handler(req, res) {
 
     res.setHeader("Cache-Control", "no-store");
     return res.status(200).json({
-      draft, css, versions,
+      draft,
+      css,
+      versions,
       passes: 1 + cycles * 2,
-      palette, notes: lastCritique, scope, component
+      palette,
+      notes: lastCritique,
+      scope,
+      component,
     });
   } catch (err) {
     const status =
-      err?.status || err?.statusCode || err?.response?.status ||
+      err?.status ||
+      err?.statusCode ||
+      err?.response?.status ||
       (String(err?.message || "").includes("JSON body") ? 400 : 500);
 
     console.error("[/api/generate-css] Error:", err?.message || err);
@@ -89,7 +94,8 @@ export default async function handler(req, res) {
 
 async function readJson(req) {
   if (req.body && typeof req.body === "object") return req.body;
-  let raw = ""; for await (const c of req) raw += c;
+  let raw = "";
+  for await (const c of req) raw += c;
   if (!raw) throw new Error("JSON body required but request body was empty.");
   try { return JSON.parse(raw); } catch { throw new Error("Invalid JSON in request body."); }
 }
@@ -107,15 +113,34 @@ function enforceScope(inputCss = "", scope = ".comp") {
   css = css.replace(/(^|})\s*([^@}{]+?)\s*\{/g, (m, p1, selectors) => {
     const scoped = selectors
       .split(",")
-      .map(s => s.trim())
-      .map(sel => (!sel || sel.startsWith(scope) || sel.startsWith(":root")) ? sel : `${scope} ${sel}`)
+      .map((s) => s.trim())
+      .map((sel) => (!sel || sel.startsWith(scope) || sel.startsWith(":root")) ? sel : `${scope} ${sel}`)
       .join(", ");
     return `${p1} ${scoped} {`;
   });
   return css.trim();
 }
 
-/* ================= model passes ================= */
+/** Get assistant text from Responses API result (robust across SDK shapes). */
+function extractText(r) {
+  if (typeof r?.output_text === "string") return r.output_text;
+  try {
+    const chunks = [];
+    for (const item of (r?.output || [])) {
+      if (item?.type === "message" && Array.isArray(item.content)) {
+        for (const c of item.content) {
+          // Some SDKs use 'output_text', some 'text'
+          if (typeof c?.text === "string") chunks.push(c.text);
+        }
+      }
+    }
+    return chunks.join("");
+  } catch {
+    return "";
+  }
+}
+
+/* ================= model passes (Responses API) ================= */
 
 async function passDraft(client, { image, palette, scope, component }) {
   const sys =
@@ -132,23 +157,25 @@ async function passDraft(client, { image, palette, scope, component }) {
     "Do NOT invent page structures or unrelated styles. No body/html/universal selectors.",
     "Include hover/focus/disabled only if clearly implied.",
     palette?.length ? `Optional palette tokens (only if matching the look): ${palette.join(", ")}` : "No palette tokens required.",
-    "Return CSS ONLY."
+    "Return CSS ONLY.",
   ].join("\n");
 
-  const r = await client.chat.completions.create({
+  const r = await client.responses.create({
     model: MODEL,
-    // temperature removed (model only supports default)
-    max_completion_tokens: 1400,
-    messages: [
-      { role: "system", content: sys },
-      { role: "user", content: [
+    max_output_tokens: 1400,
+    input: [
+      { role: "system", content: [{ type: "text", text: sys }] },
+      {
+        role: "user",
+        content: [
           { type: "text", text: usr },
-          { type: "image_url", image_url: { url: image } }
-        ] }
-    ]
+          { type: "input_image", image_url: image },
+        ],
+      },
+    ],
   });
 
-  return cssOnly(r?.choices?.[0]?.message?.content || "");
+  return cssOnly(extractText(r) || "");
 }
 
 async function passCritique(client, { image, css, palette, scope, component, cycle, total }) {
@@ -163,24 +190,30 @@ async function passCritique(client, { image, css, palette, scope, component, cyc
     `SCOPE CLASS: ${scope}`,
     `COMPONENT TYPE (hint): ${component}`,
     "List actionable corrections with target selectors when possible.",
-    "", "CURRENT CSS:", "```css", css, "```",
-    palette?.length ? `Palette hint: ${palette.join(", ")}` : ""
+    "",
+    "CURRENT CSS:",
+    "```css",
+    css,
+    "```",
+    palette?.length ? `Palette hint: ${palette.join(", ")}` : "",
   ].join("\n");
 
-  const r = await client.chat.completions.create({
+  const r = await client.responses.create({
     model: MODEL,
-    // temperature removed
-    max_completion_tokens: 900,
-    messages: [
-      { role: "system", content: sys },
-      { role: "user", content: [
+    max_output_tokens: 900,
+    input: [
+      { role: "system", content: [{ type: "text", text: sys }] },
+      {
+        role: "user",
+        content: [
           { type: "text", text: usr },
-          { type: "image_url", image_url: { url: image } }
-        ] }
-    ]
+          { type: "input_image", image_url: image },
+        ],
+      },
+    ],
   });
 
-  return textOnly(r?.choices?.[0]?.message?.content || "");
+  return textOnly(extractText(r) || "");
 }
 
 async function passFix(client, { image, css, critique, palette, scope, component, cycle, total }) {
@@ -197,23 +230,31 @@ async function passFix(client, { image, css, critique, palette, scope, component
     "- Keep all selectors under the scope.",
     "- No body/html/universal selectors. No page-level structures.",
     "- Adjust alignment, spacing, borders, radius, colors, typography, and states to match the photo.",
-    "", "CRITIQUE:", critique || "(none)",
-    "", "CURRENT CSS:", "```css", css, "```",
-    palette?.length ? `Palette hint (optional): ${palette.join(", ")}` : ""
+    "",
+    "CRITIQUE:",
+    critique || "(none)",
+    "",
+    "CURRENT CSS:",
+    "```css",
+    css,
+    "```",
+    palette?.length ? `Palette hint (optional): ${palette.join(", ")}` : "",
   ].join("\n");
 
-  const r = await client.chat.completions.create({
+  const r = await client.responses.create({
     model: MODEL,
-    // temperature removed
-    max_completion_tokens: 1600,
-    messages: [
-      { role: "system", content: sys },
-      { role: "user", content: [
+    max_output_tokens: 1600,
+    input: [
+      { role: "system", content: [{ type: "text", text: sys }] },
+      {
+        role: "user",
+        content: [
           { type: "text", text: usr },
-          { type: "image_url", image_url: { url: image } }
-        ] }
-    ]
+          { type: "input_image", image_url: image },
+        ],
+      },
+    ],
   });
 
-  return cssOnly(r?.choices?.[0]?.message?.content || css);
+  return cssOnly(extractText(r) || css);
 }
