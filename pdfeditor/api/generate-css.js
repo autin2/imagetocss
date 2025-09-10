@@ -1,10 +1,9 @@
 // /api/generate-css.js
-// Vision → CSS only. Draft + 5 "double-check" cycles (Critique → Fix).
-// Response: { draft, css, versions, passes, palette, notes }
+// CSS-only, component-scoped generator with 6 Critique→Fix cycles.
+// Response: { draft, css, versions, passes, palette, notes, scope, component }
 
 import OpenAI from "openai";
-
-const MODEL = "gpt-4o-mini"; // vision-capable + fast
+const MODEL = "gpt-4o-mini";
 
 export default async function handler(req, res) {
   try {
@@ -13,13 +12,19 @@ export default async function handler(req, res) {
       return res.status(405).json({ error: "Method not allowed" });
     }
 
-    // Read raw body (Vercel Node runtime)
+    // raw body (Vercel)
     let body = "";
     for await (const chunk of req) body += chunk;
-    const { image, palette = [], double_checks = 5 } = JSON.parse(body || "{}");
+    const {
+      image,
+      palette = [],
+      double_checks = 6,       // ← default to 6
+      scope = ".comp",         // ← root scope class for the component
+      component = "component"  // ← optional hint: "button", "card", "container", etc.
+    } = JSON.parse(body || "{}");
 
     if (!image || typeof image !== "string" || !image.startsWith("data:image")) {
-      return res.status(400).json({ error: "Send { image: dataUrl, palette?: string[], double_checks?: number }" });
+      return res.status(400).json({ error: "Send { image: dataUrl, palette?, double_checks?, scope?, component? }" });
     }
     if (!process.env.OPENAI_API_KEY) {
       return res.status(500).json({ error: "OPENAI_API_KEY not configured" });
@@ -27,32 +32,33 @@ export default async function handler(req, res) {
 
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-    // ---------- PASS 1: DRAFT ----------
-    const draft = await passDraft(client, { image, palette });
-    let css = draft;
+    // ---------- DRAFT ----------
+    let draft = await passDraft(client, { image, palette, scope, component });
+    draft = enforceScope(draft, scope);
     const versions = [draft];
-
-    // ---------- 5 DOUBLE-CHECKS (Critique → Fix) ----------
-    const cycles = Math.max(1, Math.min(Number(double_checks) || 1, 8));
+    let css = draft;
     let lastCritique = "";
 
+    // ---------- 6 DOUBLE-CHECKS (Critique → Fix) ----------
+    const cycles = Math.max(1, Math.min(Number(double_checks) || 1, 8));
     for (let i = 1; i <= cycles; i++) {
-      // A) CRITIQUE (no CSS output, just a short, structured critique text we feed into fixer)
-      lastCritique = await passCritique(client, { image, css, palette, cycle: i, total: cycles });
-
-      // B) FIX (return full, corrected CSS only)
-      css = await passFix(client, { image, css, critique: lastCritique, palette, cycle: i, total: cycles });
+      lastCritique = await passCritique(client, { image, css, palette, scope, component, cycle: i, total: cycles });
+      let fixed = await passFix(client, { image, css, critique: lastCritique, palette, scope, component, cycle: i, total: cycles });
+      fixed = enforceScope(fixed, scope);
+      css = fixed;
       versions.push(css);
     }
 
     res.setHeader("Cache-Control", "no-store");
     return res.status(200).json({
-      draft,            // initial CSS
-      css,              // final CSS after 5 double-checks
-      versions,         // [draft, after cycle1, after cycle2, ...]
+      draft,
+      css,
+      versions,
       passes: 1 + cycles * 2, // 1 draft + (critique+fix)*cycles
       palette,
-      notes: lastCritique // last critique text (useful for debugging)
+      notes: lastCritique,
+      scope,
+      component
     });
   } catch (err) {
     console.error(err);
@@ -63,30 +69,60 @@ export default async function handler(req, res) {
 /* ================= helpers ================= */
 
 function cssOnly(text = "") {
-  // remove any accidental fences / prose
   return String(text).replace(/^```(?:css)?\s*/i, "").replace(/```$/i, "").trim();
 }
-
 function textOnly(s = "") {
   return String(s).replace(/```[\s\S]*?```/g, "").trim();
 }
 
+/**
+ * Enforce scope: prefix all non-@ rules (except :root) with the scope class.
+ * This is a pragmatic regex-based guard (covers most outputs).
+ */
+function enforceScope(inputCss = "", scope = ".comp") {
+  let css = cssOnly(inputCss);
+
+  // 1) keep :root and @rules as-is; scope everything else at top-level
+  css = css.replace(/(^|})\s*([^@}{]+?)\s*\{/g, (m, p1, selectors) => {
+    // split by commas, trim each selector
+    const scoped = selectors
+      .split(",")
+      .map(s => s.trim())
+      .map(sel => {
+        if (!sel || sel.startsWith(scope) || sel.startsWith(":root")) return sel;
+        // Avoid scoping keyframe selectors etc. (handled outside via @)
+        return `${scope} ${sel}`;
+      })
+      .join(", ");
+    return `${p1} ${scoped} {`;
+  });
+
+  return css.trim();
+}
+
 /* ================= model passes ================= */
 
-async function passDraft(client, { image, palette }) {
+async function passDraft(client, { image, palette, scope, component }) {
   const sys =
-    "You are a front-end CSS engine. Output VALID vanilla CSS only (no HTML, no Markdown). " +
-    "Your stylesheet must recreate the visible appearance of the provided image as closely as possible. " +
-    "Avoid frameworks and preprocessors.";
+    "You are a front-end CSS engine. Output VALID vanilla CSS only (no HTML/Markdown). " +
+    "You are styling a SINGLE UI COMPONENT (not a full page). " +
+    "All selectors MUST be scoped under the provided SCOPE CLASS. " +
+    "Do NOT target html/body/universal selectors or add resets/normalizers. " +
+    "Keep styles minimal and faithful to the screenshot of the component.";
 
   const usr =
     [
-      "Study the screenshot and produce a first draft stylesheet.",
+      `SCOPE CLASS: ${scope}`,
+      `COMPONENT TYPE (hint): ${component}`,
+      "Task: study the screenshot region and produce CSS for ONLY that component.",
+      "Requirements:",
+      "- Prefix all selectors with the scope (e.g., `.comp .btn`), or use the scope as the root (e.g., `.comp{...}`) and descendants.",
+      "- No global resets. No page layout. No headers/footers/cookie banners.",
+      "- You MAY expose :root tokens if they are clearly needed.",
       palette?.length
-        ? `If a palette is evident, you MAY expose :root tokens using these hexes when they visually match: ${palette.join(", ")}.`
-        : "If a palette is evident, you MAY expose :root tokens.",
-      "Preserve browser defaults only where they clearly match the image; otherwise neutralize them (e.g., bullets, underlines, default margins).",
-      "Name classes naturally. Return CSS ONLY."
+        ? `Optional palette tokens: ${palette.join(", ")}`
+        : "Palette is optional.",
+      "Return CSS ONLY."
     ].join("\n");
 
   const r = await client.chat.completions.create({
@@ -105,17 +141,19 @@ async function passDraft(client, { image, palette }) {
   return cssOnly(r?.choices?.[0]?.message?.content || "");
 }
 
-async function passCritique(client, { image, css, palette, cycle, total }) {
+async function passCritique(client, { image, css, palette, scope, component, cycle, total }) {
   const sys =
-    "You are a strict visual QA assistant. Do NOT output CSS. " +
-    "Compare the screenshot to the CURRENT CSS and identify concrete mismatches. " +
-    "Be terse and specific. No HTML.";
+    "You are a strict component QA assistant. Do NOT output CSS. " +
+    "Compare the screenshot WITH the CURRENT component CSS. " +
+    "Identify concrete mismatches (alignment, spacing, radius, borders, colors, size, typography, hover). " +
+    "Ensure selectors remain under the provided scope. Be terse.";
 
   const usr =
     [
-      `Critique ${cycle}/${total}. Compare CURRENT CSS to the screenshot and list the top issues to fix.`,
-      "- Consider: alignment (left/center), spacing (margins/padding), list bullets and default margins, link underlines/visited color, fonts/weights/sizes/line-height, colors (primary/neutral), borders/dividers, corner radii (pills vs rounded), button width and shape, section backgrounds/bands.",
-      "- Output a short checklist with specific corrections and target selectors when possible.",
+      `Critique ${cycle}/${total} (component-level only).`,
+      `SCOPE CLASS: ${scope}`,
+      `COMPONENT TYPE (hint): ${component}`,
+      "List actionable corrections with target selectors when possible.",
       "",
       "CURRENT CSS:",
       "```css",
@@ -140,20 +178,21 @@ async function passCritique(client, { image, css, palette, cycle, total }) {
   return textOnly(r?.choices?.[0]?.message?.content || "");
 }
 
-async function passFix(client, { image, css, critique, palette, cycle, total }) {
+async function passFix(client, { image, css, critique, palette, scope, component, cycle, total }) {
   const sys =
-    "Return CSS only (no HTML, no Markdown). Overwrite the stylesheet to resolve the critique " +
-    "and better match the screenshot. Keep or refine class names; do not output diffs—return the FULL updated stylesheet.";
+    "Return CSS only (no HTML/Markdown). Overwrite the stylesheet to resolve the critique " +
+    "and better match the screenshot of the SINGLE COMPONENT. " +
+    "All selectors must remain under the provided scope. No global resets.";
 
   const usr =
     [
-      `Fix ${cycle}/${total}. Update the CSS to address the critique below and match the screenshot more closely.`,
+      `Fix ${cycle}/${total} for the component.`,
+      `SCOPE CLASS: ${scope}`,
+      `COMPONENT TYPE (hint): ${component}`,
       "Rules:",
-      "- Be faithful to observed alignment; do not center content unless the screenshot clearly centers it.",
-      "- Remove unwanted bullets/underlines/default margins when they don't match the screenshot.",
-      "- Ensure buttons look like the screenshot (pill radius vs rounded, width, weight, colors).",
-      "- Scope styles carefully; avoid over-broad container rules that misalign child elements.",
-      "- Keep CSS valid and framework-free. Return CSS ONLY.",
+      "- Keep all selectors under the scope.",
+      "- No body/html/universal selectors. No page-level structures.",
+      "- Adjust alignment, spacing, borders, radius, colors, typography, hover to match the screenshot.",
       "",
       "CRITIQUE:",
       critique || "(none)",
