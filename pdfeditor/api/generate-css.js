@@ -1,9 +1,12 @@
 // /api/generate-css.js
-// CSS-only, component-scoped generator with 6 Critique→Fix cycles.
+// CSS-only, component-scoped generator with N Critique→Fix cycles.
 // Response: { draft, css, versions, passes, palette, notes, scope, component }
 
 import OpenAI from "openai";
-const MODEL = "gpt-4o-mini";
+
+// === Model config ===
+// Use GPT-5 by default; allow override via env for quick A/B tests (e.g. gpt-5-mini)
+const MODEL = process.env.OPENAI_MODEL || "gpt-5";
 
 export default async function handler(req, res) {
   try {
@@ -18,9 +21,9 @@ export default async function handler(req, res) {
     const {
       image,
       palette = [],
-      double_checks = 6,       // ← default to 6
-      scope = ".comp",         // ← root scope class for the component
-      component = "component"  // ← optional hint: "button", "card", "container", etc.
+      double_checks = 6,       // default 6 critique/fix cycles
+      scope = ".comp",         // root scope class
+      component = "component"  // hint: "button", "card", "input", etc.
     } = JSON.parse(body || "{}");
 
     if (!image || typeof image !== "string" || !image.startsWith("data:image")) {
@@ -39,7 +42,7 @@ export default async function handler(req, res) {
     let css = draft;
     let lastCritique = "";
 
-    // ---------- 6 DOUBLE-CHECKS (Critique → Fix) ----------
+    // ---------- DOUBLE-CHECKS (Critique → Fix) ----------
     const cycles = Math.max(1, Math.min(Number(double_checks) || 1, 8));
     for (let i = 1; i <= cycles; i++) {
       lastCritique = await passCritique(client, { image, css, palette, scope, component, cycle: i, total: cycles });
@@ -77,20 +80,17 @@ function textOnly(s = "") {
 
 /**
  * Enforce scope: prefix all non-@ rules (except :root) with the scope class.
- * This is a pragmatic regex-based guard (covers most outputs).
+ * Pragmatic regex guard that covers common outputs.
  */
 function enforceScope(inputCss = "", scope = ".comp") {
   let css = cssOnly(inputCss);
 
-  // 1) keep :root and @rules as-is; scope everything else at top-level
   css = css.replace(/(^|})\s*([^@}{]+?)\s*\{/g, (m, p1, selectors) => {
-    // split by commas, trim each selector
     const scoped = selectors
       .split(",")
       .map(s => s.trim())
       .map(sel => {
         if (!sel || sel.startsWith(scope) || sel.startsWith(":root")) return sel;
-        // Avoid scoping keyframe selectors etc. (handled outside via @)
         return `${scope} ${sel}`;
       })
       .join(", ");
@@ -103,25 +103,24 @@ function enforceScope(inputCss = "", scope = ".comp") {
 /* ================= model passes ================= */
 
 async function passDraft(client, { image, palette, scope, component }) {
+  // Emphasize: photo/cropped screenshot of ONE component — never full page
   const sys =
     "You are a front-end CSS engine. Output VALID vanilla CSS only (no HTML/Markdown). " +
-    "You are styling a SINGLE UI COMPONENT (not a full page). " +
-    "All selectors MUST be scoped under the provided SCOPE CLASS. " +
-    "Do NOT target html/body/universal selectors or add resets/normalizers. " +
-    "Keep styles minimal and faithful to the screenshot of the component.";
+    "Input is a PHOTO or CROPPED SCREENSHOT of ONE UI COMPONENT (not a full page). " +
+    "Your job: reproduce only that component’s styles. " +
+    "Hard rules: (1) All selectors MUST be under the provided SCOPE CLASS; " +
+    "(2) No global resets, no layout, no headers/footers, no containers or pages; " +
+    "(3) Keep styles minimal, faithful to the photo, and practical.";
 
-  const usr =
-    [
+  const usr = [
       `SCOPE CLASS: ${scope}`,
       `COMPONENT TYPE (hint): ${component}`,
-      "Task: study the screenshot region and produce CSS for ONLY that component.",
-      "Requirements:",
-      "- Prefix all selectors with the scope (e.g., `.comp .btn`), or use the scope as the root (e.g., `.comp{...}`) and descendants.",
-      "- No global resets. No page layout. No headers/footers/cookie banners.",
-      "- You MAY expose :root tokens if they are clearly needed.",
+      "Task: Study the SINGLE component in the photo and output CSS for that component ONLY.",
+      "Do NOT invent page structures or unrelated styles. No body/html/universal selectors.",
+      "If states (hover/focus/disabled) are clearly implied, include them; otherwise omit.",
       palette?.length
-        ? `Optional palette tokens: ${palette.join(", ")}`
-        : "Palette is optional.",
+        ? `Optional palette tokens (use only if they match the look): ${palette.join(", ")}`
+        : "No palette tokens required.",
       "Return CSS ONLY."
     ].join("\n");
 
@@ -129,6 +128,7 @@ async function passDraft(client, { image, palette, scope, component }) {
     model: MODEL,
     temperature: 0.15,
     max_tokens: 1400,
+    // You can add: reasoning: { effort: "minimal" } if your SDK supports it on Chat Completions.
     messages: [
       { role: "system", content: sys },
       { role: "user", content: [
@@ -144,12 +144,11 @@ async function passDraft(client, { image, palette, scope, component }) {
 async function passCritique(client, { image, css, palette, scope, component, cycle, total }) {
   const sys =
     "You are a strict component QA assistant. Do NOT output CSS. " +
-    "Compare the screenshot WITH the CURRENT component CSS. " +
-    "Identify concrete mismatches (alignment, spacing, radius, borders, colors, size, typography, hover). " +
+    "Compare the PHOTO/CROPPED SCREENSHOT of a SINGLE COMPONENT with the CURRENT CSS. " +
+    "Identify concrete mismatches (alignment, spacing, radius, borders, colors, size, typography, hover/focus/disabled). " +
     "Ensure selectors remain under the provided scope. Be terse.";
 
-  const usr =
-    [
+  const usr = [
       `Critique ${cycle}/${total} (component-level only).`,
       `SCOPE CLASS: ${scope}`,
       `COMPONENT TYPE (hint): ${component}`,
@@ -180,19 +179,18 @@ async function passCritique(client, { image, css, palette, scope, component, cyc
 
 async function passFix(client, { image, css, critique, palette, scope, component, cycle, total }) {
   const sys =
-    "Return CSS only (no HTML/Markdown). Overwrite the stylesheet to resolve the critique " +
-    "and better match the screenshot of the SINGLE COMPONENT. " +
-    "All selectors must remain under the provided scope. No global resets.";
+    "Return CSS only (no HTML/Markdown). " +
+    "Overwrite the stylesheet to resolve the critique and better match the PHOTO/CROPPED SCREENSHOT of the SINGLE COMPONENT. " +
+    "All selectors must remain under the provided scope. No global resets, no page-level structures.";
 
-  const usr =
-    [
+  const usr = [
       `Fix ${cycle}/${total} for the component.`,
       `SCOPE CLASS: ${scope}`,
       `COMPONENT TYPE (hint): ${component}`,
       "Rules:",
       "- Keep all selectors under the scope.",
       "- No body/html/universal selectors. No page-level structures.",
-      "- Adjust alignment, spacing, borders, radius, colors, typography, hover to match the screenshot.",
+      "- Adjust alignment, spacing, borders, radius, colors, typography, and states to match the photo.",
       "",
       "CRITIQUE:",
       critique || "(none)",
