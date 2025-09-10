@@ -137,3 +137,65 @@ h1{font-size:38px;line-height:1.15;margin:6px 0 10px}
 @media (max-width:640px){
   h1{font-size:28px}
 }
+
+/* ===================== */
+/* App-specific additions */
+/* ===================== */
+
+/* Fixed app columns: left 360px, right fills; prevent content from growing grid width */
+.app-grid{ display:grid; grid-template-columns:360px minmax(0,1fr); gap:20px; align-items:start; }
+@media (max-width:980px){ .app-grid{ grid-template-columns:1fr } }
+
+/* Panels with fixed height; allow internal scroll */
+.app-panel{ height:560px; display:flex; flex-direction:column; min-width:0; }
+.app-panel .code#output{ flex:1 1 auto; height:auto; min-height:180px; }
+#errors{ height:120px; border-color:rgba(239,68,68,.35); color:#ffe1e1; background:#2a0b0b; }
+
+/* Make the snip-frame fill panel height and center content */
+.app-panel .snip-frame{ height:100%; display:grid; place-items:center; }
+
+/* Toggle image/empty states inside snip-frame */
+.snip-frame .preview-img{ display:none; max-width:100%; max-height:100%; object-fit:contain; }
+.snip-frame.has-image .preview-img{ display:block; }
+.snip-frame.has-image .drop-inner{ display:none; }
+
+/* Hover overlay to change the photo (only when image selected) */
+.overlay{
+  position:absolute; inset:12px; /* respect snip-frame padding and radius */
+  display:grid; place-items:center;
+  background:rgba(2,6,23,.45);
+  border-radius:inherit;
+  opacity:0; pointer-events:none; transition:opacity .15s ease;
+  z-index:2;
+}
+.snip-frame.has-image:hover .overlay,
+.snip-frame.has-image:focus-within .overlay{ opacity:1; pointer-events:auto; }
+
+/* Code area: never expand grid width; scroll long lines */
+.code{ max-width:100%; overflow-x:auto; }
+
+/* ================== */
+/* Global loading UI  */
+/* ================== */
+.loading-scrim{
+  position:fixed; inset:0; z-index:9999;
+  background:rgba(15,23,42,.42); backdrop-filter:blur(3px);
+  display:flex; align-items:center; justify-content:center;
+  opacity:0; pointer-events:none; transition:opacity .15s ease;
+}
+.loading-scrim.open{ opacity:1; pointer-events:auto; }
+.loading-card{
+  display:flex; align-items:center; gap:12px;
+  background:var(--paper); color:var(--ink);
+  border:1px solid var(--border); border-radius:12px;
+  box-shadow:var(--shadow); padding:14px 16px; min-width:260px;
+}
+.loading-title{ font-weight:800; }
+.loading-sub{ font-size:12px; color:var(--muted); }
+
+.spinner{
+  width:24px; height:24px; border-radius:999px;
+  border:3px solid #e5e7eb; border-top-color: var(--accent);
+  animation: spin .9s linear infinite;
+}
+@keyframes spin{ to{ transform: rotate(360deg) } }
