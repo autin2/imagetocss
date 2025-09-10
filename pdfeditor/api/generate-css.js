@@ -2,25 +2,26 @@
 // CSS-only, component-scoped generator with optional Critique→Fix cycles.
 // Uses OpenAI Responses API with image+text input.
 // Guardrails: use gradients only if the screenshot clearly has one.
-// Includes model fallback if your project lacks GPT-5 access.
+// Returns: { draft, css, versions, passes, palette, notes, scope, component, model }
 
-// IMPORTANT: we read the raw stream ourselves
+// IMPORTANT: we read the raw stream ourselves (Next.js / Vercel)
 export const config = { api: { bodyParser: false } };
 
 import OpenAI from "openai";
 
 // Preferred model first, then fallbacks your account likely has.
 const MODEL_FALLBACKS = [
-  "gpt-5",          // primary
-  "gpt-5-mini",     // smaller/faster
-  "gpt-4.1-mini",   // widely available 2025
-  "gpt-4o-mini"     // broadly available legacy mini
+  "gpt-5",        // primary
+  "gpt-5-mini",   // smaller/faster
+  "gpt-4.1-mini", // widely available
+  "gpt-4o-mini"   // broadly available legacy mini
 ];
 
 // Token caps for Responses API (use max_output_tokens, not max_tokens)
 const MAX_TOKENS_DRAFT = 1400;
 const MAX_TOKENS_CRIT  = 800;
 const MAX_TOKENS_FIX   = 1600;
+const PING_TOKENS      = 32;   // >= 16 required by API
 
 export default async function handler(req, res) {
   try {
@@ -35,14 +36,16 @@ export default async function handler(req, res) {
 
     let parsed;
     try { parsed = JSON.parse(raw || "{}"); }
-    catch (e) { return res.status(400).json({ error: "Invalid JSON body", details: String(e?.message || e) }); }
+    catch (e) {
+      return res.status(400).json({ error: "Invalid JSON body", details: String(e?.message || e) });
+    }
 
     const {
       image,
       palette = [],
       scope = ".comp",
       component = "component",
-      double_checks = 1,        // 1 fast pass by default (max 4)
+      double_checks = 1,        // 1 fast pass by default (bounded 1..4)
       force_solid = false,      // client flatness hint
       solid_color = ""          // suggested hex when flat
     } = parsed;
@@ -176,26 +179,25 @@ function solidifyCss(css = "", hex = "#cccccc") {
 
 /* ======== model picking with graceful fallback ======== */
 async function pickWorkingModel(client, candidates) {
-  // Try a tiny “ping” to each model until one works
   let lastErr;
   for (const m of candidates) {
     try {
       const ping = await client.responses.create({
         model: m,
-        input: [{ role: "user", content: [{ type: "input_text", text: "ping" }] }],
-        max_output_tokens: 1
+        input: [
+          { role: "user", content: [{ type: "input_text", text: "ping" }] }
+        ],
+        max_output_tokens: PING_TOKENS // must be >= 16
       });
       if (ping?.output_text !== undefined) return m;
     } catch (e) {
       lastErr = e;
-      // If the error is clearly “model does not exist / no access”, continue to next
       const msg = (e?.message || "").toLowerCase();
       if (msg.includes("does not exist") || msg.includes("you do not have access")) continue;
       // Other errors (quota, key invalid, etc.) → bubble up
       throw e;
     }
   }
-  // If none worked, throw the last error so client sees a useful message
   throw lastErr || new Error("No working model from fallback list");
 }
 
