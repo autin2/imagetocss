@@ -39,7 +39,8 @@
           <input id="file" type="file" accept="image/*" hidden>
         </div>
 
-        <div class="grid-3" style="gap:12px; margin-top:14px">
+        <!-- Inputs (palette removed) -->
+        <div class="grid-2" style="gap:12px; margin-top:14px">
           <div>
             <div class="lead" style="font-size:13px;margin:0 0 6px;color:var(--muted);font-weight:700">Scope class</div>
             <input id="scope" type="text" class="input" value=".comp" placeholder=".comp" style="width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--border)"/>
@@ -48,13 +49,9 @@
             <div class="lead" style="font-size:13px;margin:0 0 6px;color:var(--muted);font-weight:700">Component hint</div>
             <input id="component" type="text" class="input" value="button" placeholder="button, card, input, …" style="width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--border)"/>
           </div>
-          <div>
-            <div class="lead" style="font-size:13px;margin:0 0 6px;color:var(--muted);font-weight:700">Optional palette tokens (comma-separated)</div>
-            <input id="palette" type="text" class="input" placeholder="--blue: #3b82f6, --radius: 12px" style="width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--border)"/>
-          </div>
         </div>
 
-        <!-- Controls row (fixed heights, no weird wrapping) -->
+        <!-- Controls row (one line, aligned) -->
         <div class="controls" style="margin-top:12px">
           <button id="runBtn" class="btn primary">Generate CSS</button>
           <button id="clearBtn" class="btn">Clear</button>
@@ -102,7 +99,6 @@
 
     const scopeEl = document.getElementById('scope');
     const componentEl = document.getElementById('component');
-    const paletteEl = document.getElementById('palette');
 
     const runBtn = document.getElementById('runBtn');
     const clearBtn = document.getElementById('clearBtn');
@@ -182,11 +178,11 @@
     function flash(msg){ sizeHint.textContent = msg; setTimeout(()=> sizeHint.textContent = sizeHint.textContent || msg, 1400); }
 
     // ----- API helper (safe text → JSON) -----
-    async function generateCSS({ image, palette = [], scope = ".comp", component = "button" }) {
+    async function generateCSS({ image, scope = ".comp", component = "button" }) {
       const r = await fetch("/api/generate-css", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image, palette, scope, component }),
+        body: JSON.stringify({ image, palette: [], scope, component }), // palette removed → send []
       });
 
       const text = await r.text();
@@ -218,7 +214,6 @@
         errorsEl.textContent = "Pick or paste an image first (cropped to a single component).";
         apiStatus.textContent = "400"; apiStatus.style.color = "#ef4444"; return;
       }
-      const pal = paletteEl.value ? paletteEl.value.split(",").map(s => s.trim()).filter(Boolean) : [];
 
       try {
         runBtn.disabled = true;
@@ -228,7 +223,6 @@
 
         const res = await generateCSS({
           image: dataUrl,
-          palette: pal,
           scope: scopeEl.value || ".comp",
           component: componentEl.value || "component"
         });
