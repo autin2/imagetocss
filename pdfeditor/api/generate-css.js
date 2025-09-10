@@ -7,7 +7,7 @@ import OpenAI from "openai";
 // Default model; override with OPENAI_MODEL (e.g., "gpt-5-mini")
 const MODEL = process.env.OPENAI_MODEL || "gpt-5";
 
-// If using Next.js Pages API
+// Next.js Pages API: we'll read the body stream ourselves
 export const config = { api: { bodyParser: false } };
 
 export default async function handler(req, res) {
@@ -36,7 +36,7 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: "OPENAI_API_KEY not configured" });
     }
 
-    // Size guard (adjust to your runtime)
+    // Size guard (tweak to your runtime)
     const approxBytes = Buffer.byteLength(image, "utf8");
     const MAX_BYTES = 4.5 * 1024 * 1024;
     if (approxBytes > MAX_BYTES) {
@@ -55,8 +55,12 @@ export default async function handler(req, res) {
     // ---------- CRITIQUE → FIX LOOPS ----------
     const cycles = Math.max(1, Math.min(Number(double_checks) || 1, 8));
     for (let i = 1; i <= cycles; i++) {
-      lastCritique = await passCritique(client, { image, css, palette, scope, component, cycle: i, total: cycles });
-      let fixed = await passFix(client, { image, css, critique: lastCritique, palette, scope, component, cycle: i, total: cycles });
+      lastCritique = await passCritique(client, {
+        image, css, palette, scope, component, cycle: i, total: cycles
+      });
+      let fixed = await passFix(client, {
+        image, css, critique: lastCritique, palette, scope, component, cycle: i, total: cycles
+      });
       fixed = enforceScope(fixed, scope);
       css = fixed;
       versions.push(css);
@@ -80,12 +84,18 @@ export default async function handler(req, res) {
       err?.response?.status ||
       (String(err?.message || "").includes("JSON body") ? 400 : 500);
 
-    console.error("[/api/generate-css] Error:", err?.message || err);
-    if (err?.response?.data) console.error("[openai-error-data]", err.response.data);
+    const toStr = (x) => {
+      if (typeof x === "string") return x;
+      try { return JSON.stringify(x, Object.getOwnPropertyNames(x)); }
+      catch { return String(x); }
+    };
+
+    console.error("[/api/generate-css] Error:", toStr(err));
+    const details = err?.response?.data ?? err?.data ?? undefined;
 
     return res.status(status).json({
-      error: err?.message || "Failed to generate CSS.",
-      details: err?.response?.data || undefined,
+      error: toStr(err?.message) || toStr(details) || "Failed to generate CSS.",
+      details,
     });
   }
 }
