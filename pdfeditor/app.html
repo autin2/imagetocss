@@ -56,7 +56,7 @@
 <body>
   <div class="wrap">
     <h1>Image → CSS</h1>
-    <p class="sub">Upload/paste a <b>cropped screenshot of one component</b> (button, card, input). We’ll generate scoped CSS with GPT-5 and refine it via critique→fix loops.</p>
+    <p class="sub">Upload/paste a <b>cropped screenshot of one component</b> (button, card, input). We’ll generate scoped CSS with GPT-5.</p>
 
     <div class="grid">
       <!-- LEFT -->
@@ -82,14 +82,11 @@
             <label for="component">Component hint</label>
             <input id="component" type="text" value="button" placeholder="button, card, input, …">
           </div>
-          <div style="width:140px">
-            <label for="checks">Checks (1–8)</label>
-            <input id="checks" type="number" min="1" max="8" value="4">
+          <div style="flex:1 1 100%">
+            <label for="palette">Optional palette tokens (comma-separated)</label>
+            <input id="palette" type="text" placeholder="--blue: #3b82f6, --radius: 12px">
           </div>
         </div>
-
-        <label for="palette">Optional palette tokens (comma-separated)</label>
-        <input id="palette" type="text" placeholder="--blue: #3b82f6, --radius: 12px">
 
         <div class="row" style="margin-top:12px">
           <button id="runBtn" class="btn primary">Generate CSS</button>
@@ -136,7 +133,6 @@
 
     const scopeEl = document.getElementById('scope');
     const componentEl = document.getElementById('component');
-    const checksEl = document.getElementById('checks');
     const paletteEl = document.getElementById('palette');
 
     const runBtn = document.getElementById('runBtn');
@@ -195,11 +191,11 @@
     function flash(msg){ sizeHint.textContent = msg; setTimeout(()=> sizeHint.textContent = sizeHint.textContent || msg, 1400); }
 
     // ----- API helper (safe text → JSON) -----
-    async function generateCSS({ image, palette = [], scope = ".comp", component = "button", double_checks = 4 }) {
+    async function generateCSS({ image, palette = [], scope = ".comp", component = "button" }) {
       const r = await fetch("/api/generate-css", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image, palette, scope, component, double_checks }),
+        body: JSON.stringify({ image, palette, scope, component }), // single-pass API ignores checks
       });
 
       const text = await r.text(); // read raw
@@ -245,8 +241,7 @@
           image: dataUrl,
           palette: pal,
           scope: scopeEl.value || ".comp",
-          component: componentEl.value || "component",
-          double_checks: Math.max(1, Math.min(8, Number(checksEl.value) || 4))
+          component: componentEl.value || "component"
         });
 
         apiStatus.textContent = "200 OK"; apiStatus.classList.add('ok');
@@ -256,6 +251,13 @@
         outputEl.textContent = res.css || "";
         notesEl.textContent = res.notes || "";
         versionsEl.textContent = (res.versions || []).map((v,i)=>`v${i}:\n${v}`).join("\n\n---\n\n") || "(none)";
+
+        // Show raw model text if CSS is empty to help debug extraction
+        if (!res.css || !res.css.trim()) {
+          errorsEl.textContent = `Model raw_out (first 2k):\n` + String(res.raw_out || "").slice(0, 2000);
+        } else {
+          errorsEl.textContent = ""; // clear any previous raw_out
+        }
       } catch (err) {
         apiStatus.textContent = String(err.status || 500); apiStatus.classList.add('err');
         statusLead.textContent = "Error";
@@ -277,7 +279,7 @@
     }
     function clearAll(){
       clearOutputs(); dataUrl=""; preview.src=""; preview.style.display="none";
-      sizeHint.textContent="No image selected"; scopeEl.value=".comp"; componentEl.value="button"; checksEl.value=4; paletteEl.value="";
+      sizeHint.textContent="No image selected"; scopeEl.value=".comp"; componentEl.value="button"; paletteEl.value="";
     }
     function copyFlash(btn){ const prev=btn.textContent; btn.textContent="Copied!"; setTimeout(()=>btn.textContent=prev, 900); }
   </script>
