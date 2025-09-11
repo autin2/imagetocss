@@ -1,5 +1,5 @@
 // /pages/api/generate-css.js
-// Image → CSS (literal). Pill-aware facts → CSS builder with strict scoping.
+// Image → CSS (literal, pill-aware). Returns { css, html, facts, used_model }.
 // IMPORTANT: disable Next body parser; we read the stream ourselves.
 export const config = { api: { bodyParser: false } };
 
@@ -7,16 +7,16 @@ import OpenAI from "openai";
 
 /* ---------------- Model selection ---------------- */
 const MODEL_CHAIN = [
-  process.env.OPENAI_MODEL,   // optional override: "gpt-5", "gpt-5-mini", etc.
+  process.env.OPENAI_MODEL,   // optional override: "gpt-5", "gpt-5-mini"
   "gpt-5",
   "gpt-5-mini",
   "gpt-4o",
   "gpt-4o-mini",
 ].filter(Boolean);
 
-const isGpt5   = (m) => /^gpt-5(\b|-)/i.test(m || "");
-const is4o     = (m) => /^gpt-4o(-mini)?$/i.test(m || "");
-const canSee   = is4o; // vision via chat.completions content parts
+const isGpt5 = (m) => /^gpt-5(\b|-)/i.test(m || "");
+const is4o   = (m) => /^gpt-4o(-mini)?$/i.test(m || "");
+const canSee = is4o; // multimodal image parts via chat.completions
 
 /* ---------------- HTTP handler ---------------- */
 export default async function handler(req, res) {
@@ -38,11 +38,7 @@ export default async function handler(req, res) {
     try { body = raw ? JSON.parse(raw) : {}; }
     catch (e) { return sendError(res, 400, "Bad JSON", e?.message); }
 
-    const {
-      image,
-      scope = ".comp",
-      component = "component",
-    } = body || {};
+    const { image, scope = ".comp", component = "component" } = body || {};
 
     if (!image || typeof image !== "string" || !/^data:image\//i.test(image)) {
       return sendError(res, 400, "Send { image: dataUrl, scope?, component? }");
@@ -55,21 +51,22 @@ export default async function handler(req, res) {
     const { resolveModel, callOnce } = wrapOpenAI(client);
     const model = await resolveModel();
 
-    // 1) FACTS (vision JSON)
+    // 1) Extract literal facts from screenshot (vision JSON)
     const facts = await passFacts({ model, image, scope, component, callOnce });
 
-    // 2) CSS from facts (literal)
+    // 2) Build CSS literally from facts (no invention)
     let css = await passCssFromFacts({ model, image, scope, component, facts, callOnce });
 
-    // Fallback repair if empty
+    // 2b) Strict repair if empty
     if (!css || !css.trim()) {
       css = await passCssRepair({ model, image, scope, component, facts, callOnce });
     }
+    // 2c) Last-ditch on 4o-mini if needed
     if (!css || !css.trim()) {
       css = await passCssFromFacts({ model: "gpt-4o-mini", image, scope, component, facts, callOnce });
     }
 
-    // 3) Scope + final repairs
+    // 3) Scope + final grammar repairs (no trailing commas / missing semicolons)
     css = enforceScope(css, scope);
     css = autofixCss(css);
 
@@ -77,7 +74,7 @@ export default async function handler(req, res) {
       return sendError(res, 502, "Model returned no CSS", "Empty after repairs");
     }
 
-    // 4) HTML snippet that fits selectors & visible text
+    // 4) Return an HTML stub that matches the visible elements & text
     const html = suggestHtml(css, scope, facts);
 
     res.setHeader("Cache-Control", "no-store");
@@ -97,12 +94,13 @@ function wrapOpenAI(client) {
         lastErr = e;
         const msg = String(e?.message || "");
         const soft = e?.status === 404 || /unknown|does not exist|restricted|Unsupported/i.test(msg);
-        if (!soft) throw e; // real failure
+        if (!soft) throw e;
       }
     }
     throw lastErr || new Error("No usable model");
   }
   async function resolveModel() {
+    // tiny probe
     return tryEach(async (m) => {
       const probe = { model: m, messages: [{ role: "user", content: "ping" }] };
       if (isGpt5(m)) probe.max_completion_tokens = 8; else probe.max_tokens = 8;
@@ -112,8 +110,12 @@ function wrapOpenAI(client) {
   async function callOnce(kind, { model, messages }) {
     const budgets = { facts: 900, css: 1600 };
     const p = { model, messages };
-    if (isGpt5(model)) p.max_completion_tokens = budgets[kind] || 900;
-    else { p.max_tokens = budgets[kind] || 900; p.temperature = kind === "facts" ? 0 : 0.1; }
+    if (isGpt5(model)) {
+      p.max_completion_tokens = budgets[kind] || 900; // GPT-5 param
+    } else {
+      p.max_tokens = budgets[kind] || 900;            // 4o/4o-mini param
+      p.temperature = kind === "facts" ? 0 : 0.1;
+    }
     const r = await client.chat.completions.create(p);
     return r?.choices?.[0]?.message?.content ?? "";
   }
@@ -123,16 +125,15 @@ function wrapOpenAI(client) {
 /* ---------------- Passes ---------------- */
 async function passFacts({ model, image, scope, component, callOnce }) {
   const sys =
-    "Return JSON ONLY. Describe objective, measurable style facts of ONE UI component screenshot. " +
-    "Hex colors only. If not visible, leave empty/false. JSON must match the schema exactly. " +
-    "Do NOT invent gradients or shadows.";
+    "Return JSON ONLY (no prose). Report objective, measurable style facts of ONE UI component screenshot. " +
+    "Hex colors only (#RRGGBB). If not visible, leave empty/false. Do NOT invent gradients or shadows.";
 
-  // Pill-aware schema; explicit bg kind and caret detection.
+  // Pill-aware + button text + caret + bg kind
   const schema = `
 {
   "bg_kind": "solid" | "gradient" | "transparent",
-  "background_color": string,              // hex if bg_kind=solid else ""
-  "has_gradient": boolean,                 // duplicate convenience flag
+  "background_color": string,
+  "has_gradient": boolean,
   "gradient_direction": "to bottom" | "to right" | "to left" | "to top" | "",
   "gradient_stops": [ { "pos": number, "color": string } ],
 
@@ -140,19 +141,21 @@ async function passFacts({ model, image, scope, component, callOnce }) {
   "border_color": string,
   "border_width_px": number,
   "border_radius_px": number,
-  "is_pill": boolean,                      // true if ends fully rounded (chip)
-  "pill_radius_px": number,                // measured max radius if pill
+  "is_pill": boolean,
+  "pill_radius_px": number,
 
   "shadow": { "x_px": number, "y_px": number, "blur_px": number, "spread_px": number, "color": string },
 
   "text_color": string,
   "font_size_px": number,
-  "font_weight": number,                   // 400/500/600/700…
+  "font_weight": number,
+  "font_family": string,
+
   "padding_x_px": number,
   "padding_y_px": number,
   "gap_px": number,
 
-  "caret_visible": boolean,                // ▼ chevron present?
+  "caret_visible": boolean,
   "caret_color": string,
 
   "link_color": string,
@@ -166,16 +169,16 @@ async function passFacts({ model, image, scope, component, callOnce }) {
   "has_icon": boolean
 }`.trim();
 
-  const userText =
+  const instructions =
     `SCOPE: ${scope}\nCOMPONENT: ${component}\n` +
-    "Measure literally. If the chip is a pill with white background and subtle gray border, " +
-    "set is_pill=true, bg_kind='solid', background_color='#FFFFFF', border_present=true, border_color near #E5E7EB. " +
-    "Only set gradient if there are >=2 distinct stops (ΔL* > 10). Round pixels to integers.\n\n" + schema;
+    "Measure literally. If a white chip pill is shown, set is_pill=true, bg_kind='solid', background_color '#FFFFFF', " +
+    "border_present=true and border_color near '#E5E7EB'. Only set gradient if there are ≥2 distinct stops. " +
+    "Round pixel values to integers. Include button_text exactly as rendered.\n\n" + schema;
 
   const messages = [
     { role: "system", content: sys },
     { role: "user", content: [
-        { type: "text", text: userText },
+        { type: "text", text: instructions },
         { type: "image_url", image_url: { url: image, detail: "high" } }
       ] }
   ];
@@ -188,18 +191,19 @@ async function passFacts({ model, image, scope, component, callOnce }) {
 async function passCssFromFacts({ model, image, scope, component, facts, callOnce }) {
   const sys =
     "Output VALID vanilla CSS only (no HTML/Markdown). Build styles literally from FACTS. " +
-    "All selectors must be under SCOPE. No resets. No creativity.";
+    "All selectors under SCOPE; no resets; no creativity.";
 
   const instructions =
     `SCOPE: ${scope}\nCOMPONENT: ${component}\n` +
-    "- Use bg_kind to decide background: if 'gradient' use linear-gradient(direction, stops); if 'solid' use background-color; if 'transparent' omit bg.\n" +
-    "- If is_pill, set border-radius to 9999px (or pill_radius_px if larger) and prefer background-color to pure white when indicated.\n" +
-    "- Apply border only if border_present; use width and color.\n" +
+    "- If bg_kind === 'gradient': background: linear-gradient(gradient_direction, stops).\n" +
+    "- If bg_kind === 'solid': background-color exactly background_color.\n" +
+    "- If is_pill === true: border-radius: 9999px (or pill_radius_px if larger).\n" +
+    "- Apply border only when border_present (width/color).\n" +
     "- Apply shadow only if color present.\n" +
-    "- Use text_color, font_size_px, font_weight, paddings, gap.\n" +
-    "- If caret_visible, add a `.caret` SVG color using caret_color or a muted gray.\n" +
-    "- If link_color present, add a scoped anchor rule; underline if link_underline is true.\n" +
-    "- Add a gentle hover only for white pills: background-color: #f9fafb.\n" +
+    "- Use text_color, font_size_px, font_weight, font_family if present.\n" +
+    "- Apply paddings and gap (gap belongs on the container, not the button).\n" +
+    "- If caret_visible: add a `.caret` SVG color rule.\n" +
+    "- If link_color present: add scoped anchor rule; underline if link_underline.\n" +
     "Return CSS ONLY.\n\nFACTS JSON:\n" + JSON.stringify(facts);
 
   const messages = [
@@ -214,11 +218,11 @@ async function passCssFromFacts({ model, image, scope, component, facts, callOnc
 }
 
 async function passCssRepair({ model, image, scope, component, facts, callOnce }) {
-  const sys = "Return VALID CSS only (no HTML/Markdown). If previous CSS empty, synthesize minimal literal CSS from FACTS. Scope under SCOPE.";
+  const sys = "Return VALID CSS only (no HTML/Markdown). Previous CSS was empty. Build minimal literal CSS from FACTS under SCOPE.";
   const instructions =
     `SCOPE: ${scope}\nCOMPONENT: ${component}\n` +
-    "Build minimal correct CSS from FACTS. Ensure braces/semicolons present. Return CSS ONLY.\n\nFACTS JSON:\n" +
-    JSON.stringify(facts);
+    "Ensure braces/semicolons. No defaults that could be wrong (e.g., don't set text color if unknown). " +
+    "Return CSS ONLY.\n\nFACTS JSON:\n" + JSON.stringify(facts);
 
   const messages = [
     { role: "system", content: sys },
@@ -233,7 +237,7 @@ async function passCssRepair({ model, image, scope, component, facts, callOnce }
 
 /* ---------------- HTML synthesis ---------------- */
 function suggestHtml(css, scope, facts) {
-  const className = scope.replace(/^\./, "");
+  const cls = scope.replace(/^\./, "");
   const parts = [];
 
   if (facts?.has_icon) {
@@ -245,32 +249,29 @@ function suggestHtml(css, scope, facts) {
   }
   if (facts?.has_button) {
     const label = facts?.button_text || "Button";
-    parts.push(`<button type="button" aria-haspopup="listbox" aria-expanded="false">` +
-               `<span>${esc(label)}</span>` +
-               (facts?.caret_visible ? caretSvg(facts?.caret_color) : "") +
-               `</button>`);
+    parts.push(`<button type="button" aria-haspopup="listbox" aria-expanded="false"><span>${esc(label)}</span>${facts?.caret_visible ? caretSvg(facts?.caret_color) : ""}</button>`);
   }
   if (facts?.has_link) {
     parts.push(`<a href="#">${esc(facts?.button_text || "Link")}</a>`);
   }
   if (!parts.length) {
-    parts.push(`<button type="button"><span>${esc(facts?.button_text || "Daily")}</span>${caretSvg(facts?.caret_color)}</button>`);
+    parts.push(`<button type="button"><span>${esc(facts?.button_text || "Daily")}</span>${facts?.caret_visible ? caretSvg(facts?.caret_color) : ""}</button>`);
   }
 
-  return `<div class="${className}" role="group">\n  ${parts.join("\n  ")}\n</div>`;
+  return `<div class="${cls}" role="group">\n  ${parts.join("\n  ")}\n</div>`;
 }
 function caretSvg(color) {
-  const fill = color && /^#/.test(color) ? color : "#6b7280";
-  return ` <svg class="caret" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 9l6 6 6-6" stroke="${esc(fill)}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  const stroke = color && /^#/.test(color) ? color : "#6b7280";
+  return ` <svg class="caret" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 9l6 6 6-6" stroke="${esc(stroke)}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 }
 
 /* ---------------- Utilities ---------------- */
 function cssOnly(s=""){ return String(s).replace(/^```(?:css)?\s*/i, "").replace(/```$/i, "").trim(); }
 function enforceScope(inputCss="", scope=".comp"){
   let css = cssOnly(inputCss);
-  css = css.replace(/(^|})\s*([^@}{]+?)\s*\{/g,(m,p1,selectors)=>{
-    const scoped = selectors.split(",").map(s=>s.trim()).map(sel =>
-      (!sel || sel.startsWith(scope) || sel.startsWith(":root")) ? sel : `${scope} ${sel}`
+  css = css.replace(/(^|})\s*([^@}{]+?)\s*\{/g,(m,p1,sel)=>{
+    const scoped = sel.split(",").map(s=>s.trim()).map(x =>
+      (!x || x.startsWith(scope) || x.startsWith(":root")) ? x : `${scope} ${x}`
     ).join(", ");
     return `${p1} ${scoped} {`;
   });
@@ -278,8 +279,8 @@ function enforceScope(inputCss="", scope=".comp"){
 }
 function autofixCss(css=""){
   let out = cssOnly(css);
-  out = out.replace(/,\s*(;|\})/g,"$1");      // trailing commas
-  out = out.replace(/([^;{}\s])\s*\}/g,"$1; }");
+  out = out.replace(/,\s*(;|\})/g,"$1");       // dangling commas
+  out = out.replace(/([^;{}\s])\s*\}/g,"$1; }"); // missing semicolons
   const open=(out.match(/\{/g)||[]).length, close=(out.match(/\}/g)||[]).length;
   if(open>close) out += "}".repeat(open-close);
   return out.trim();
@@ -291,7 +292,8 @@ function normalizeFacts(f){
   const b=(v)=>!!v;
 
   const out = {
-    bg_kind: ["solid","gradient","transparent"].includes(f?.bg_kind) ? f.bg_kind : (f?.has_gradient ? "gradient" : (f?.background_color ? "solid" : "transparent")),
+    bg_kind: ["solid","gradient","transparent"].includes(f?.bg_kind) ? f.bg_kind
+             : (f?.has_gradient ? "gradient" : (f?.background_color ? "solid" : "transparent")),
     background_color: hex(f?.background_color),
     has_gradient: !!f?.has_gradient,
     gradient_direction: typeof f?.gradient_direction==="string" ? f.gradient_direction : "",
@@ -309,9 +311,11 @@ function normalizeFacts(f){
 
     shadow: { x_px:n(f?.shadow?.x_px,0), y_px:n(f?.shadow?.y_px,0), blur_px:n(f?.shadow?.blur_px,0), spread_px:n(f?.shadow?.spread_px,0), color: hex(f?.shadow?.color||"") },
 
-    text_color: hex(f?.text_color || "#111827"),
+    text_color: typeof f?.text_color === "string" ? hex(f.text_color) : "", // no risky default
     font_size_px: n(f?.font_size_px,14),
-    font_weight: n(f?.font_weight,500), // prefer 500 default for chips
+    font_weight: n(f?.font_weight,500),
+    font_family: typeof f?.font_family === "string" ? f.font_family : "",
+
     padding_x_px: n(f?.padding_x_px,12),
     padding_y_px: n(f?.padding_y_px,6),
     gap_px: n(f?.gap_px,8),
@@ -330,14 +334,9 @@ function normalizeFacts(f){
     has_icon: b(f?.has_icon),
   };
 
-  // Normalize bg flags
   if (out.bg_kind === "gradient" && !out.gradient_stops.length) out.bg_kind = "transparent";
-  if (out.is_pill && out.bg_kind === "transparent") {
-    // Common case: white pill; default to white if border looks present.
-    if (out.border_present) { out.bg_kind = "solid"; out.background_color = out.background_color || "#FFFFFF"; }
-  }
   return out;
 }
 function esc(s=""){ return String(s).replace(/[&<>"']/g,m=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[m])); }
 function sendError(res,status,error,details){ const p={ error:String(error||"Unknown") }; if(details) p.details=String(details); res.status(status).json(p); }
-function extractErr(e){ if(e?.response?.data){ try{ return JSON.stringify(e.response.data); }catch{} return String(e.response.data); } return String(e?.message||e); }
+function extractErr(e){ if (e?.response?.data) { try { return JSON.stringify(e.response.data); } catch {} return String(e.response.data); } return String(e?.message||e); }
