@@ -1,24 +1,33 @@
 // /api/generate-css.js
 // Component-scoped CSS generator with critique→fix loops, robust GPT-5/4o support,
-// empty-output recovery (vision fallback + text-only), and CSS autofix.
+// empty-output recovery (vision fallback + text-only), CSS autofix,
+// and a final pass that returns a WORKING HTML snippet for the styles.
+//
+// ENV:
+//   OPENAI_API_KEY (required)
+//   OPENAI_MODEL   (optional) one of: gpt-5, gpt-5-mini, gpt-4o, gpt-4o-mini
+//
+// Response:
+//   { draft, css, html, versions, passes, palette, notes, scope, component, used_model }
 
 import OpenAI from "openai";
 
 /* ---------------- Models ---------------- */
 const MODEL_CHAIN = [
   process.env.OPENAI_MODEL, // optional override
-  "gpt-5",                  // if your project has access; may not support vision
-  "gpt-5-mini",             // same caveat
+  "gpt-5",
+  "gpt-5-mini",
   "gpt-4o",
   "gpt-4o-mini"
 ].filter(Boolean);
 
 const DEFAULT_MODEL = MODEL_CHAIN[0] || "gpt-4o-mini";
 
-/* Heuristic: which models support image_url reliably via Chat Completions */
+/* Heuristic: models that reliably support image_url in Chat Completions */
 function supportsVision(model) {
   return /gpt-4o(-mini)?$/i.test(model);
 }
+function isGpt5(m){ return /^gpt-5(\b|-)/i.test(m); }
 
 /* ---------------- HTTP handler ---------------- */
 export default async function handler(req, res) {
@@ -41,9 +50,9 @@ export default async function handler(req, res) {
       double_checks = 1,            // 1–8
       scope = ".comp",
       component = "component",
-      force_solid = false,
-      solid_color = "",
-      minify = false,
+      force_solid = false,          // optional: replace gradients with solid
+      solid_color = "",             // optional solid color
+      minify = false,               // optional minify result
       debug = false
     } = body;
 
@@ -58,7 +67,7 @@ export default async function handler(req, res) {
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const { resolveModel, callOnce } = makeOpenAI(client);
 
-    // Resolve a usable model (for text). Vision may still be switched per-call.
+    // Resolve a usable base model (text). Vision may still be switched per call.
     const baseModel = await resolveModel();
 
     // ---------- DRAFT (with robust fallbacks) ----------
@@ -96,9 +105,18 @@ export default async function handler(req, res) {
     if (force_solid) css = flattenGradients(css, solid_color);
     if (minify) css = minifyCss(css);
 
+    // ---------- HTML SNIPPET ----------
+    let html = await suggestHtml({ baseModel, image, css, scope, component, callOnce });
+    if (!html || !html.trim()) {
+      html = buildHtmlFromCss(css, scope) || ensureScopedHtml(`<div>${fallbackInner(component)}</div>`, scope);
+    }
+    html = htmlOnly(html);
+    html = ensureScopedHtml(html, scope);
+
     const payload = {
       draft,
       css,
+      html,
       versions,
       passes: 1 + cycles * 2,
       palette,
@@ -119,16 +137,14 @@ export default async function handler(req, res) {
 
 /* ---------------- OpenAI glue ---------------- */
 
-function isGpt5(m){ return /^gpt-5(\b|-)/i.test(m); }
-
 function buildChatParams({ model, messages, kind }) {
   const base = { model, messages };
-  const BUDGET = { draft: 1200, critique: 700, fix: 1400 };
+  const BUDGET = { draft: 1200, critique: 700, fix: 1400, html: 600 };
   const max = BUDGET[kind] || 900;
 
   if (isGpt5(model)) {
-    base.max_completion_tokens = max;   // GPT-5 style
-    // omit temperature (some GPT-5 configs only accept default)
+    base.max_completion_tokens = max;   // GPT-5 uses this
+    // temperature omitted (some GPT-5 configs accept only default)
   } else {
     base.max_tokens = max;              // 4o / 4o-mini
     base.temperature = kind === "critique" ? 0.0 : (kind === "draft" ? 0.2 : 0.1);
@@ -164,11 +180,11 @@ function makeOpenAI(client) {
   };
 
   const callOnce = async (kind, args) => {
-    // If the chosen model likely doesn't support vision, switch to a vision model for image calls.
+    // If this step uses the image, force a vision-capable model when needed.
     let modelForThisCall = args.model;
     const usingImage = !!args.image && !args.no_image;
     if (usingImage && !supportsVision(modelForThisCall)) {
-      modelForThisCall = "gpt-4o"; // hard vision fallback
+      modelForThisCall = "gpt-4o"; // vision fallback
     }
 
     const sys = {
@@ -187,35 +203,64 @@ function makeOpenAI(client) {
       fix:
         "Return CSS only (no HTML/Markdown). Overwrite the stylesheet to resolve the critique " +
         "and better match the screenshot of the SINGLE COMPONENT. " +
-        "All selectors must remain under the provided scope. No global resets."
+        "All selectors must remain under the provided scope. No global resets.",
+      html:
+        "Return HTML ONLY (no Markdown, no code fences). Produce a minimal DOM snippet that DEMONSTRATES the styles " +
+        "defined by the provided CSS. The ROOT must be a single element using the provided SCOPE CLASS (e.g., <div class=\".comp\">). " +
+        "Use reasonable placeholder text/values. Prefer semantic elements (button, input, label, a, img) as indicated by selectors."
     }[kind];
 
     // Build messages (image + text OR text-only)
-    const userTextLines = [
+    const baseLines = [
       `SCOPE CLASS: ${args.scope}`,
       `COMPONENT TYPE (hint): ${args.component}`
     ];
 
+    let messages;
+
     if (kind === "draft") {
-      userTextLines.push(
+      const usr = [
+        ...baseLines,
         usingImage
           ? "Task: study the screenshot region and produce CSS for ONLY that component."
-          : "No screenshot available. Produce reasonable CSS for the component using the hint and palette."
-      );
-      userTextLines.push(
+          : "No screenshot available. Produce reasonable CSS for the component using the hint and palette.",
         "- Prefix selectors with the scope (or use the scope as root).",
         "- No page layout or resets.",
         args.palette?.length ? `Optional palette tokens: ${args.palette.join(", ")}` : "Palette: optional.",
         "Return CSS ONLY."
-      );
+      ].join("\n");
+
+      messages = usingImage
+        ? [
+            { role: "system", content: sys },
+            { role: "user", content: [{ type: "text", text: usr }, { type: "image_url", image_url: { url: args.image, detail: "high" } }] }
+          ]
+        : [
+            { role: "system", content: sys },
+            { role: "user", content: [{ type: "text", text: usr }] }
+          ];
+
     } else if (kind === "critique") {
-      userTextLines.push(
+      const usr = [
+        ...baseLines,
         `Critique ${args.cycle}/${args.total}. List actionable corrections with target selectors where possible.`,
         "", "CURRENT CSS:", "```css", args.css, "```",
         args.palette?.length ? `Palette hint: ${args.palette.join(", ")}` : ""
-      );
+      ].join("\n");
+
+      messages = usingImage
+        ? [
+            { role: "system", content: sys },
+            { role: "user", content: [{ type: "text", text: usr }, { type: "image_url", image_url: { url: args.image, detail: "high" } }] }
+          ]
+        : [
+            { role: "system", content: sys },
+            { role: "user", content: [{ type: "text", text: usr }] }
+          ];
+
     } else if (kind === "fix") {
-      userTextLines.push(
+      const usr = [
+        ...baseLines,
         `Fix ${args.cycle}/${args.total} for the component.`,
         "Rules:",
         "- Keep all selectors under the scope.",
@@ -224,27 +269,41 @@ function makeOpenAI(client) {
         "", "CRITIQUE:", args.critique || "(none)",
         "", "CURRENT CSS:", "```css", args.css, "```",
         args.palette?.length ? `Palette hint (optional): ${args.palette.join(", ")}` : ""
-      );
+      ].join("\n");
+
+      messages = usingImage
+        ? [
+            { role: "system", content: sys },
+            { role: "user", content: [{ type: "text", text: usr }, { type: "image_url", image_url: { url: args.image, detail: "high" } }] }
+          ]
+        : [
+            { role: "system", content: sys },
+            { role: "user", content: [{ type: "text", text: usr }] }
+          ];
+
+    } else if (kind === "html") {
+      const usr = [
+        ...baseLines,
+        "Generate the minimal HTML snippet that will pick up ALL styles in the CSS.",
+        "ROOT must be a single element that uses the scope class.",
+        "", "CSS:", "```css", args.css, "```",
+      ].join("\n");
+
+      messages = [
+        { role: "system", content: sys },
+        { role: "user", content: [{ type: "text", text: usr }] } // text-only
+      ];
+    } else {
+      throw new Error(`Unknown kind: ${kind}`);
     }
-
-    const userPart = { type: "text", text: userTextLines.join("\n") };
-
-    const messages = usingImage
-      ? [
-          { role: "system", content: sys },
-          { role: "user", content: [userPart, { type: "image_url", image_url: { url: args.image, detail: "high" } }] }
-        ]
-      : [
-          { role: "system", content: sys },
-          { role: "user", content: [userPart] }
-        ];
 
     const params = buildChatParams({ model: modelForThisCall, messages, kind });
     const r = await client.chat.completions.create(params);
 
-    return (kind === "critique")
-      ? textOnly(r?.choices?.[0]?.message?.content || "")
-      : cssOnly(r?.choices?.[0]?.message?.content || (kind === "fix" ? args.css : ""));
+    if (kind === "critique") return textOnly(r?.choices?.[0]?.message?.content || "");
+    if (kind === "html")     return htmlOnly(r?.choices?.[0]?.message?.content || "");
+    // draft/fix
+    return cssOnly(r?.choices?.[0]?.message?.content || (kind === "fix" ? args.css : ""));
   };
 
   return { resolveModel, callOnce };
@@ -253,11 +312,11 @@ function makeOpenAI(client) {
 /* ---------------- Recovery wrappers ---------------- */
 
 async function safeDraft({ baseModel, image, palette, scope, component, callOnce }) {
-  // 1) try with whatever model they chose (auto-vision fallback inside callOnce)
+  // 1) try with chosen model (auto-vision fallback inside callOnce)
   let out = await callOnce("draft", { model: baseModel, image, palette, scope, component });
   if (out && out.trim()) return out;
 
-  // 2) retry once (same path)
+  // 2) retry once
   out = await callOnce("draft", { model: baseModel, image, palette, scope, component });
   if (out && out.trim()) return out;
 
@@ -269,7 +328,7 @@ async function safeDraft({ baseModel, image, palette, scope, component, callOnce
     } catch {}
   }
 
-  // 4) text-only fallback (no image block at all)
+  // 4) text-only fallback (no image block)
   try {
     out = await callOnce("draft", { model: "gpt-4o-mini", no_image: true, image: null, palette, scope, component });
     if (out && out.trim()) return out;
@@ -286,6 +345,17 @@ async function safeCritique(args) {
 async function safeFix(args) {
   try { return await args.callOnce("fix", args); }
   catch { return args.css || ""; }
+}
+
+/* Generate HTML after CSS is finalized */
+async function suggestHtml({ baseModel, image, css, scope, component, callOnce }) {
+  try {
+    // We intentionally use a TEXT-ONLY prompt for determinism.
+    const html = await callOnce("html", { model: baseModel, css, scope, component, no_image: true });
+    return htmlOnly(html);
+  } catch {
+    return "";
+  }
 }
 
 /* ---------------- Helpers & post-processing ---------------- */
@@ -316,6 +386,12 @@ function cssOnly(text = "") {
 }
 function textOnly(s = "") {
   return String(s).replace(/```[\s\S]*?```/g, "").trim();
+}
+function htmlOnly(s = "") {
+  return String(s)
+    .replace(/^```(?:html)?\s*/i, "")
+    .replace(/```$/i, "")
+    .trim();
 }
 
 /** Prefix non-@, non-:root top-level selectors with scope */
@@ -362,4 +438,53 @@ function minifyCss(css = "") {
     .replace(/\s*([\{\}:;,])\s*/g, "$1")
     .replace(/;}/g, "}")
     .trim();
+}
+
+/* Build a reasonable HTML snippet from selectors if the model doesn't return one */
+function buildHtmlFromCss(css, scope) {
+  const className = getScopeClass(scope);
+  const need = {
+    inputText: /\binput\[type\s*=\s*["']?text["']?\]/i.test(css),
+    inputEmail: /\binput\[type\s*=\s*["']?email["']?\]/i.test(css),
+    inputSearch: /\binput\[type\s*=\s*["']?search["']?\]/i.test(css),
+    textarea: /\btextarea\b/i.test(css),
+    select: /\bselect\b/i.test(css),
+    button: /\bbutton\b/i.test(css),
+    a: /\ba\b/i.test(css),
+    label: /\blabel\b/i.test(css),
+    img: /\bimg\b/i.test(css)
+  };
+
+  const parts = [];
+  if (need.label) parts.push(`<label for="field">Label</label>`);
+  if (need.inputText) parts.push(`<input id="field" type="text" placeholder="Enter text">`);
+  if (need.inputEmail) parts.push(`<input type="email" placeholder="name@example.com">`);
+  if (need.inputSearch) parts.push(`<input type="search" placeholder="Search">`);
+  if (need.textarea) parts.push(`<textarea rows="3" placeholder="Type here"></textarea>`);
+  if (need.select) parts.push(`<select><option>One</option><option>Two</option></select>`);
+  if (need.img) parts.push(`<img alt="preview" src="https://dummyimage.com/80x48/ddd/999.png&text=img">`);
+  if (need.a) parts.push(`<a href="#">Link</a>`);
+  if (need.button) parts.push(`<button>Submit</button>`);
+  if (!parts.length) parts.push(`Button`); // bare content when nothing obvious
+
+  return `<div class="${className}">\n  ${parts.join("\n  ")}\n</div>`;
+}
+
+function ensureScopedHtml(html, scope) {
+  const className = getScopeClass(scope);
+  const rootRe = new RegExp(`<([a-z0-9-]+)([^>]*class=["'][^"']*${escapeReg(className)}[^"']*["'][^>]*)>`, "i");
+  if (rootRe.test(html)) return html.trim();
+  // wrap
+  return `<div class="${className}">\n${html.trim()}\n</div>`;
+}
+
+function getScopeClass(scope = ".comp") {
+  return String(scope || ".comp").trim().replace(/^\./, "");
+}
+function escapeReg(s){ return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+function fallbackInner(componentHint = "component") {
+  if (/input|field/i.test(componentHint)) return `<input type="text" placeholder="Enter text">`;
+  if (/link|anchor/i.test(componentHint)) return `<a href="#">Link</a>`;
+  if (/card/i.test(componentHint)) return `<div class="item"><h4>Title</h4><p>Body</p><button>Action</button></div>`;
+  return `<button>Submit</button>`;
 }
