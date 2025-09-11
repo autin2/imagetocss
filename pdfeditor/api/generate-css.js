@@ -1,23 +1,7 @@
 // /api/generate-css.js
-// Pixel-faithful, component-scoped CSS from an image.
-// Pipeline:
-// 1) FACTS (JSON from screenshot)  -> 2) BUILD CSS from facts (literal) -> 3) QA/repair
-// Also returns a minimal HTML snippet that covers all selectors in the CSS
-// (buttons, inputs, anchors, icons, etc.) with text pulled from the image when visible.
-//
-// ENV:
-//   OPENAI_API_KEY  (required)
-//   OPENAI_MODEL    (optional) prefer "gpt-5" or "gpt-5-mini"; falls back to "gpt-4o" / "gpt-4o-mini"
-//
-// POST body:
-//   { image: dataUrl, scope?: ".comp", component?: "button", double_checks?: 1 }
-//
-// Response 200:
-//   { css, html, facts, scope, component, used_model }
-//
-// Notes:
-// - This version is “literal”: gradients only if clearly present, exact colors/sizes,
-//   link styling when a link is visible, measured paddings/border/shadows, etc.
+// Pixel-faithful, component-scoped CSS from an image with robust error paths.
+// IMPORTANT: we disable Next.js bodyParser because we read the raw stream ourselves.
+export const config = { api: { bodyParser: false } };
 
 import OpenAI from "openai";
 
@@ -32,8 +16,8 @@ const MODEL_CHAIN = [
 
 const DEFAULT_MODEL = MODEL_CHAIN[0] || "gpt-4o-mini";
 
-function isGpt5(m) { return /^gpt-5(\b|-)/i.test(m || ""); }
-function supportsVision(m) { return /gpt-4o(-mini)?$/i.test(m || ""); }
+const isGpt5 = (m) => /^gpt-5(\b|-)/i.test(m || "");
+const supportsVision = (m) => /gpt-4o(-mini)?$/i.test(m || "");
 
 /* ---------------- HTTP handler ---------------- */
 export default async function handler(req, res) {
@@ -42,63 +26,62 @@ export default async function handler(req, res) {
       res.setHeader("Allow", "POST");
       return res.status(405).json({ error: "Method not allowed" });
     }
-
     if (!process.env.OPENAI_API_KEY) {
       return sendError(res, 500, "OPENAI_API_KEY not configured");
     }
 
+    // ---- Read raw JSON body safely ----
     let raw = "";
-    for await (const chunk of req) raw += chunk;
+    try {
+      for await (const chunk of req) raw += chunk;
+    } catch (e) {
+      return sendError(res, 400, "Failed to read request body", e?.message);
+    }
 
-    let body = {};
-    try { body = raw ? JSON.parse(raw) : {}; }
-    catch (e) { return sendError(res, 400, "Bad JSON", e?.message); }
+    let body;
+    try {
+      body = raw ? JSON.parse(raw) : {};
+    } catch (e) {
+      return sendError(res, 400, "Bad JSON", e?.message);
+    }
 
     const {
       image,
       scope = ".comp",
       component = "component",
-      double_checks = 1
+      double_checks = 1,
     } = body || {};
 
     if (!image || typeof image !== "string" || !/^data:image\//i.test(image)) {
-      return sendError(res, 400, "Send { image: dataUrl, ... }");
+      return sendError(res, 400, "Send { image: dataUrl, scope?, component?, double_checks? }");
     }
 
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const { resolveModel, callOnce } = makeOpenAI(client);
 
-    const baseModel = await resolveModel();
+    const model = await resolveModel();
 
-    // 1) FACTS (pure JSON; strict schema)
-    const facts = await safeFacts({ model: baseModel, image, scope, component, callOnce });
+    // 1) FACTS (strict JSON from screenshot)
+    const facts = await safeFacts({ model, image, scope, component, callOnce });
 
-    // 2) CSS from facts (literal, scoped)
-    let css = await safeCssFromFacts({ model: baseModel, image, scope, component, facts, callOnce });
+    // 2) CSS from facts (literal)
+    let css = await safeCssFromFacts({ model, image, scope, component, facts, callOnce });
 
     // 3) QA / repair
     css = enforceScope(css, scope);
     css = autofixCss(css);
-
     if (!css.trim()) {
       return sendError(res, 502, "Model returned no CSS", "Empty CSS after attempts.");
     }
 
-    // 4) HTML snippet that covers all selectors & uses visible text (facts)
+    // 4) HTML snippet that covers all selectors & uses visible text
     let html = suggestHtmlFromFacts(css, scope, facts);
     if (!html || !html.trim()) {
       html = `<div class="${getScopeClass(scope)}"><button>${escapeHtml(facts?.button_text || "Submit")}</button></div>`;
     }
 
     res.setHeader("Cache-Control", "no-store");
-    return res.status(200).json({
-      css,
-      html,
-      facts,
-      scope,
-      component,
-      used_model: baseModel
-    });
+    return res.status(200).json({ css, html, facts, scope, component, used_model: model });
 
   } catch (err) {
     return sendError(res, 500, "Failed to generate CSS.", extractErrMsg(err));
@@ -112,10 +95,9 @@ function buildParams(model, kind, messages) {
   const max = budget[kind] || 900;
   const base = { model, messages };
   if (isGpt5(model)) {
-    // GPT-5 uses max_completion_tokens and default temperature
-    base.max_completion_tokens = max;
+    base.max_completion_tokens = max;   // GPT-5 uses this; no temperature override
   } else {
-    base.max_tokens = max;
+    base.max_tokens = max;              // 4o / 4o-mini
     base.temperature = kind === "facts" ? 0.0 : 0.1;
   }
   return base;
@@ -130,7 +112,7 @@ function makeOpenAI(client) {
         lastErr = e;
         const msg = (e && e.message) ? String(e.message) : "";
         const soft = e?.status === 404 || /does not exist|unknown model|restricted/i.test(msg);
-        if (!soft) throw e; // hard error
+        if (!soft) throw e;
       }
     }
     throw lastErr || new Error("No usable model found");
@@ -138,11 +120,12 @@ function makeOpenAI(client) {
 
   async function resolveModel() {
     return await tryEach(async (m) => {
-      await client.chat.completions.create(
-        isGpt5(m)
-          ? { model: m, messages: [{ role:"user", content:"ping" }], max_completion_tokens: 16 }
-          : { model: m, messages: [{ role:"user", content:"ping" }], max_tokens: 16 }
-      );
+      // tiny ping—if this fails, model is unusable
+      if (isGpt5(m)) {
+        await client.chat.completions.create({ model: m, messages: [{ role: "user", content: "ping" }], max_completion_tokens: 16 });
+      } else {
+        await client.chat.completions.create({ model: m, messages: [{ role: "user", content: "ping" }], max_tokens: 16 });
+      }
     });
   }
 
@@ -159,33 +142,32 @@ function makeOpenAI(client) {
 
 async function safeFacts({ model, image, scope, component, callOnce }) {
   const sys =
-    "You return JSON ONLY. You describe objective, measurable style facts of ONE UI component screenshot. " +
-    "No creativity. If a property is not visible, leave it empty or false. " +
-    "Your JSON must be valid and strictly match the schema keys.";
+    "You return JSON ONLY. Describe objective, measurable style facts of ONE UI component screenshot. " +
+    "No creativity. If a property is not visible, leave it empty/false. JSON must be valid and match the schema exactly.";
 
   const schema = `
-Return EXACTLY this JSON schema with the keys below (no markdown, no comments):
+Return EXACTLY this JSON (no markdown):
 
 {
   "has_gradient": boolean,
   "gradient_direction": "to bottom" | "to right" | "to left" | "to top" | "",
-  "gradient_stops": [ { "pos": number, "color": string } ],  // pos 0..1, hex like #RRGGBB
-  "background_color": string,    // hex; empty if gradient present
-  "border_color": string,        // hex
+  "gradient_stops": [ { "pos": number, "color": string } ],
+  "background_color": string,
+  "border_color": string,
   "border_width_px": number,
   "border_radius_px": number,
-  "shadow": { "x_px": number, "y_px": number, "blur_px": number, "spread_px": number, "color": string }, // empty color if none
-  "text_color": string,          // hex
+  "shadow": { "x_px": number, "y_px": number, "blur_px": number, "spread_px": number, "color": string },
+  "text_color": string,
   "font_size_px": number,
-  "font_weight": number,         // 400, 500, 600, 700…
+  "font_weight": number,
   "padding_x_px": number,
   "padding_y_px": number,
-  "gap_px": number,              // space between inner items if visible; else 0
-  "link_color": string,          // hex if any link text visible, else ""
+  "gap_px": number,
+  "link_color": string,
   "link_underline": boolean,
 
-  "button_text": string,         // visible CTA like "Subscribe"
-  "input_placeholder": string,   // visible placeholder if an input exists
+  "button_text": string,
+  "input_placeholder": string,
   "has_button": boolean,
   "has_input": boolean,
   "has_link": boolean,
@@ -193,22 +175,17 @@ Return EXACTLY this JSON schema with the keys below (no markdown, no comments):
 }
 `.trim();
 
-  // Prefer a vision-capable model for this step
   const visionModel = supportsVision(model) ? model : "gpt-4o";
   const messages = [
     { role: "system", content: sys },
-    {
-      role: "user",
-      content: [
-        { type: "text", text:
-          [
+    { role: "user", content: [
+        { type: "text", text: [
             `SCOPE CLASS: ${scope}`,
             `COMPONENT: ${component}`,
-            "Task: Provide literal, measured facts from the image. Colors MUST be hex (#RRGGBB).",
-            "Gradients ONLY if visually evident. Otherwise background_color.",
-            "Round all px values to nearest integer. Avoid inventing values.",
-            "",
-            schema
+            "Return literal measured values. Colors must be hex #RRGGBB.",
+            "Gradients ONLY if visually evident; else use background_color.",
+            "Round px values to nearest integer.",
+            "", schema
           ].join("\n")
         },
         { type: "image_url", image_url: { url: image, detail: "high" } }
@@ -216,50 +193,44 @@ Return EXACTLY this JSON schema with the keys below (no markdown, no comments):
     }
   ];
 
-  // call
   let raw = await callOnce("facts", { model: visionModel, messages });
   let obj = tryParseJson(raw);
   if (!obj || typeof obj !== "object") obj = {};
-
-  // Normalize minimal defaults
   return normalizeFacts(obj);
 }
 
 async function safeCssFromFacts({ model, image, scope, component, facts, callOnce }) {
   const sys =
-    "You output VALID vanilla CSS only (no HTML/Markdown). You will rebuild the stylesheet literally from the given FACTS. " +
-    "Do not invent gradients, shadows, fonts, or colors. Use the provided values. " +
-    "All selectors MUST be under the provided SCOPE CLASS only. No resets.";
+    "Output VALID vanilla CSS only (no HTML/Markdown). Rebuild the stylesheet literally from FACTS. " +
+    "Do not invent gradients, shadows, fonts, or colors. Scope all selectors under SCOPE CLASS. No resets.";
 
   const instructions = [
     `SCOPE CLASS: ${scope}`,
     `COMPONENT: ${component}`,
     "Recreate styles literally:",
-    "- If has_gradient is true, use linear-gradient with gradient_direction and gradient_stops.",
+    "- If has_gradient true, use linear-gradient with gradient_direction and gradient_stops.",
     "- Else use background-color with background_color.",
-    "- Apply border (width, color) and border-radius.",
+    "- Apply border (width/color) and border-radius.",
     "- Apply box-shadow only if shadow.color is not empty.",
-    "- Use text_color, font_size_px, font_weight, paddings.",
-    "- If link_color present, add a scoped .comp a rule with color and underline if link_underline is true.",
-    "- Use gap if component seems multi-item (icon/text/link).",
+    "- Use text_color, font_size_px, font_weight, padding_x/y.",
+    "- If link_color present, add a scoped anchor rule with color and underline if link_underline is true.",
+    "- Use gap if the component is multi-item.",
     "Return CSS ONLY."
   ].join("\n");
 
   const messages = [
     { role: "system", content: sys },
-    { role: "user",
-      content: [
+    { role: "user", content: [
         { type: "text", text: instructions + "\n\nFACTS JSON:\n" + JSON.stringify(facts) },
-        // We include the image as context, but facts should dominate:
-        supportsVision(model) ? { type: "image_url", image_url: { url: image, detail: "high" } } : { type:"text", text:"(image omitted for this model)" }
+        supportsVision(model)
+          ? { type: "image_url", image_url: { url: image, detail: "high" } }
+          : { type: "text", text: "(image omitted)" }
       ]
     }
   ];
 
-  // Favor base model (5 or 4o). If base is 5 (no temperature control), it's fine.
   let raw = await callOnce("css", { model, messages });
-  let css = cssOnly(raw);
-  return css;
+  return cssOnly(raw);
 }
 
 /* ---------------- HTML from facts ---------------- */
@@ -269,28 +240,20 @@ function suggestHtmlFromFacts(css, scope, facts) {
   const parts = [];
 
   if (facts?.has_icon) {
-    parts.push(
-      `<span class="icon" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="8"/></svg></span>`
-    );
+    parts.push(`<span class="icon" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="8"/></svg></span>`);
   }
-
-  // Text/CTA or input/link based on flags
   if (facts?.has_input) {
     const ph = facts?.input_placeholder || "Enter text";
     parts.push(`<input type="text" placeholder="${escapeHtml(ph)}">`);
   }
-
   if (facts?.has_button) {
     const label = facts?.button_text || "Submit";
     parts.push(`<button>${escapeHtml(label)}</button>`);
   }
-
   if (facts?.has_link) {
     parts.push(`<a href="#">${escapeHtml(facts.button_text || "Previous period")}</a>`);
   }
-
   if (!parts.length) {
-    // fallback to generic pill with dropdown arrow if nothing detected
     parts.push(`<span class="text">${escapeHtml(facts?.button_text || "Label")}</span>`);
     parts.push(`<span class="dropdown" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 24 24" fill="none"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>`);
   }
@@ -346,19 +309,15 @@ function normalizeFacts(f) {
     has_icon: b(f.has_icon)
   };
 
-  // If gradient is false or stops missing, ensure background_color is used
   if (!out.has_gradient || !out.gradient_stops.length) {
     out.has_gradient = false;
     out.gradient_direction = "";
     out.gradient_stops = [];
   }
-
   return out;
 }
 
-function cssOnly(text="") {
-  return String(text).replace(/^```(?:css)?\s*/i, "").replace(/```$/i, "").trim();
-}
+function cssOnly(text=""){ return String(text).replace(/^```(?:css)?\s*/i, "").replace(/```$/i, "").trim(); }
 function enforceScope(inputCss = "", scope = ".comp") {
   let css = cssOnly(inputCss);
   css = css.replace(/(^|})\s*([^@}{]+?)\s*\{/g, (m, p1, selectors) => {
@@ -373,7 +332,7 @@ function enforceScope(inputCss = "", scope = ".comp") {
 }
 function autofixCss(css = "") {
   let out = cssOnly(css);
-  out = out.replace(/,\s*(;|\})/g, "$1");        // trailing commas
+  out = out.replace(/,\s*(;|\})/g, "$1");        // dangling commas before ; or }
   out = out.replace(/([^;\{\}\s])\s*\}/g, "$1; }");
   const open = (out.match(/\{/g) || []).length;
   const close = (out.match(/\}/g) || []).length;
