@@ -1,20 +1,26 @@
 // /api/generate-css.js
-// Component-scoped CSS generator with critique→fix loops, shadow emphasis,
-// GPT-5/4o compatibility, and a "shadow ensure" recovery pass.
+// Component-scoped CSS generator with critique→fix loops, robust GPT-5/4o support,
+// empty-output recovery (vision fallback + text-only), and CSS autofix.
 
 import OpenAI from "openai";
 
-/* ---------- models ---------- */
+/* ---------------- Models ---------------- */
 const MODEL_CHAIN = [
-  process.env.OPENAI_MODEL,
-  "gpt-5",
-  "gpt-5-mini",
+  process.env.OPENAI_MODEL, // optional override
+  "gpt-5",                  // if your project has access; may not support vision
+  "gpt-5-mini",             // same caveat
   "gpt-4o",
   "gpt-4o-mini"
 ].filter(Boolean);
+
 const DEFAULT_MODEL = MODEL_CHAIN[0] || "gpt-4o-mini";
 
-/* ---------- handler ---------- */
+/* Heuristic: which models support image_url reliably via Chat Completions */
+function supportsVision(model) {
+  return /gpt-4o(-mini)?$/i.test(model);
+}
+
+/* ---------------- HTTP handler ---------------- */
 export default async function handler(req, res) {
   try {
     if (req.method !== "POST") {
@@ -27,15 +33,14 @@ export default async function handler(req, res) {
 
     let body = {};
     try { body = raw ? JSON.parse(raw) : {}; }
-    catch (e) { return sendError(res, 400, "Bad JSON", e?.message, "Send application/json"); }
+    catch (e) { return sendError(res, 400, "Bad JSON", e?.message, "Send Content-Type: application/json"); }
 
     const {
       image,
       palette = [],
-      double_checks = 1,              // 1–8
+      double_checks = 1,            // 1–8
       scope = ".comp",
       component = "component",
-      prefer_shadows = true,          // <— NEW: try hard to include drop shadows if visible
       force_solid = false,
       solid_color = "",
       minify = false,
@@ -51,26 +56,29 @@ export default async function handler(req, res) {
 
     const cycles = clampInt(double_checks, 1, 8);
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-    const { getUsableModel, callOnce } = makeOpenAI(client);
+    const { resolveModel, callOnce } = makeOpenAI(client);
 
-    const usedModel = await getUsableModel();
+    // Resolve a usable model (for text). Vision may still be switched per-call.
+    const baseModel = await resolveModel();
 
-    // ----- draft -----
-    let draft = await callOnce("draft", { model: usedModel, image, palette, scope, component, prefer_shadows });
+    // ---------- DRAFT (with robust fallbacks) ----------
+    let draft = await safeDraft({
+      baseModel, image, palette, scope, component, callOnce
+    });
     draft = enforceScope(draft, scope);
 
     let css = draft;
     const versions = [draft];
     let lastCritique = "";
 
-    // ----- critique→fix -----
+    // ---------- CRITIQUE→FIX ----------
     for (let i = 1; i <= cycles; i++) {
-      lastCritique = await callOnce("critique", {
-        model: usedModel, image, css, palette, scope, component, cycle: i, total: cycles, prefer_shadows
+      lastCritique = await safeCritique({
+        baseModel, image, css, palette, scope, component, cycle: i, total: cycles, callOnce
       });
 
-      let fixed = await callOnce("fix", {
-        model: usedModel, image, css, critique: lastCritique, palette, scope, component, cycle: i, total: cycles, prefer_shadows
+      let fixed = await safeFix({
+        baseModel, image, css, critique: lastCritique, palette, scope, component, cycle: i, total: cycles, callOnce
       });
 
       fixed = enforceScope(fixed, scope);
@@ -78,15 +86,9 @@ export default async function handler(req, res) {
       versions.push(css);
     }
 
-    // ----- post / shadow ensure -----
+    // ---------- POST ----------
     css = cssOnly(css);
     css = autofixCss(css);
-
-    if (prefer_shadows && !/\bbox-shadow\b/i.test(css)) {
-      css = await ensureDropShadow(callOnce, { model: usedModel, image, css, scope, component });
-      css = cssOnly(autofixCss(css));
-    }
-
     if (!css.trim()) {
       return sendError(res, 502, "Model returned no CSS", "Empty completion after retries.");
     }
@@ -103,9 +105,9 @@ export default async function handler(req, res) {
       notes: lastCritique,
       scope,
       component,
-      used_model: usedModel
+      used_model: baseModel
     };
-    if (debug) payload.debug = { model_chain: MODEL_CHAIN };
+    if (debug) payload.debug = { model_chain: MODEL_CHAIN, vision_supported: supportsVision(baseModel) };
 
     res.setHeader("Cache-Control", "no-store");
     return res.status(200).json(payload);
@@ -115,13 +117,22 @@ export default async function handler(req, res) {
   }
 }
 
-/* ---------- OpenAI glue ---------- */
+/* ---------------- OpenAI glue ---------------- */
+
 function isGpt5(m){ return /^gpt-5(\b|-)/i.test(m); }
+
 function buildChatParams({ model, messages, kind }) {
   const base = { model, messages };
   const BUDGET = { draft: 1200, critique: 700, fix: 1400 };
   const max = BUDGET[kind] || 900;
-  if (isGpt5(model)) base.max_completion_tokens = max; else { base.max_tokens = max; base.temperature = kind === "critique" ? 0.0 : (kind === "draft" ? 0.2 : 0.1); }
+
+  if (isGpt5(model)) {
+    base.max_completion_tokens = max;   // GPT-5 style
+    // omit temperature (some GPT-5 configs only accept default)
+  } else {
+    base.max_tokens = max;              // 4o / 4o-mini
+    base.temperature = kind === "critique" ? 0.0 : (kind === "draft" ? 0.2 : 0.1);
+  }
   return base;
 }
 
@@ -134,14 +145,15 @@ function makeOpenAI(client) {
         lastErr = e;
         const msg = String(e?.message || "");
         const soft = e?.status === 404 || /does not exist|unknown model|restricted/i.test(msg);
-        if (!soft) throw e;
+        if (!soft) throw e; // hard error; stop
       }
     }
     throw lastErr || new Error("No usable model found");
   }
 
-  const getUsableModel = async () => {
+  const resolveModel = async () => {
     const { model } = await tryEachModel(async (m) => {
+      // tiny text ping; if this fails, model is unusable
       await client.chat.completions.create({
         model: m,
         messages: [{ role: "user", content: "ping" }],
@@ -152,139 +164,137 @@ function makeOpenAI(client) {
   };
 
   const callOnce = async (kind, args) => {
-    const model = args.model;
+    // If the chosen model likely doesn't support vision, switch to a vision model for image calls.
+    let modelForThisCall = args.model;
+    const usingImage = !!args.image && !args.no_image;
+    if (usingImage && !supportsVision(modelForThisCall)) {
+      modelForThisCall = "gpt-4o"; // hard vision fallback
+    }
 
-    const sysDraft =
-      "You are a front-end CSS engine. Output VALID vanilla CSS only (no HTML/Markdown). " +
-      "You are styling ONE UI COMPONENT (not a full page). " +
-      "All selectors MUST be scoped under the provided SCOPE CLASS. " +
-      "Do NOT target html/body/universal selectors or add resets/normalizers. " +
-      "Shadows & highlights: If a cast outer drop shadow is visible below/right of the component, " +
-      "include a matching box-shadow layer (offset, blur, and color). If none is visible, do not invent one. " +
-      "Also preserve any inset gloss/highlight if present via an extra layer or ::after overlay. " +
-      "Return CSS ONLY.";
+    const sys = {
+      draft:
+        "You are a front-end CSS engine. Output VALID vanilla CSS only (no HTML/Markdown). " +
+        "You are styling ONE UI COMPONENT (not a full page). " +
+        "All selectors MUST be scoped under the provided SCOPE CLASS. " +
+        "Do NOT target html/body/universal selectors or add resets/normalizers. " +
+        "If gradients are visible, use linear-gradient; if not, prefer a solid background-color. " +
+        "Return CSS ONLY.",
+      critique:
+        "You are a strict component QA assistant. Do NOT output CSS. " +
+        "Compare the screenshot WITH the CURRENT component CSS. " +
+        "Identify concrete mismatches (alignment, spacing, radius, borders, colors, size, typography, shadows/gradients). " +
+        "Ensure selectors remain under the provided scope. Be terse.",
+      fix:
+        "Return CSS only (no HTML/Markdown). Overwrite the stylesheet to resolve the critique " +
+        "and better match the screenshot of the SINGLE COMPONENT. " +
+        "All selectors must remain under the provided scope. No global resets."
+    }[kind];
 
-    const sysCrit =
-      "You are a strict component QA assistant. Do NOT output CSS. " +
-      "Compare the screenshot WITH the CURRENT component CSS. " +
-      "Identify concrete mismatches in: alignment, spacing, radius, borders, COLORS, TYPOGRAPHY, GRADIENTS, and " +
-      "especially OUTER CAST SHADOWS and INSET HIGHLIGHTS. " +
-      "Note exact shadow direction (e.g., down/right), offset/blur, and whether a hard base shadow (0 blur) exists. " +
-      "Ensure selectors remain under the provided scope. Be terse.";
-
-    const sysFix =
-      "Return CSS only (no HTML/Markdown). Overwrite the stylesheet to resolve the critique and match the screenshot. " +
-      "All selectors must remain under the provided scope. Include outer box-shadow and inset highlights if visible.";
+    // Build messages (image + text OR text-only)
+    const userTextLines = [
+      `SCOPE CLASS: ${args.scope}`,
+      `COMPONENT TYPE (hint): ${args.component}`
+    ];
 
     if (kind === "draft") {
-      const usr =
-        [
-          `SCOPE CLASS: ${args.scope}`,
-          `COMPONENT TYPE (hint): ${args.component}`,
-          "Study the screenshot region and produce CSS for ONLY that component.",
-          "- Use linear-gradient only if a gradient is visible; otherwise use a solid background-color.",
-          args.palette?.length ? `Optional palette tokens: ${args.palette.join(", ")}` : "Palette: optional.",
-          "Return CSS ONLY."
-        ].join("\n");
-
-      const messages = [
-        { role: "system", content: sysDraft },
-        { role: "user",
-          content: [
-            { type: "text", text: usr },
-            { type: "image_url", image_url: { url: args.image, detail: "high" } }
-          ]
-        }
-      ];
-      const params = buildChatParams({ model, messages, kind: "draft" });
-      const r = await client.chat.completions.create(params);
-      return cssOnly(r?.choices?.[0]?.message?.content || "");
+      userTextLines.push(
+        usingImage
+          ? "Task: study the screenshot region and produce CSS for ONLY that component."
+          : "No screenshot available. Produce reasonable CSS for the component using the hint and palette."
+      );
+      userTextLines.push(
+        "- Prefix selectors with the scope (or use the scope as root).",
+        "- No page layout or resets.",
+        args.palette?.length ? `Optional palette tokens: ${args.palette.join(", ")}` : "Palette: optional.",
+        "Return CSS ONLY."
+      );
+    } else if (kind === "critique") {
+      userTextLines.push(
+        `Critique ${args.cycle}/${args.total}. List actionable corrections with target selectors where possible.`,
+        "", "CURRENT CSS:", "```css", args.css, "```",
+        args.palette?.length ? `Palette hint: ${args.palette.join(", ")}` : ""
+      );
+    } else if (kind === "fix") {
+      userTextLines.push(
+        `Fix ${args.cycle}/${args.total} for the component.`,
+        "Rules:",
+        "- Keep all selectors under the scope.",
+        "- No body/html/universal selectors.",
+        "- Adjust borders, radius, colors, gradients, typography, and shadows to match the screenshot.",
+        "", "CRITIQUE:", args.critique || "(none)",
+        "", "CURRENT CSS:", "```css", args.css, "```",
+        args.palette?.length ? `Palette hint (optional): ${args.palette.join(", ")}` : ""
+      );
     }
 
-    if (kind === "critique") {
-      const usr =
-        [
-          `Critique ${args.cycle}/${args.total} (component-level only).`,
-          `SCOPE CLASS: ${args.scope}`, `COMPONENT TYPE (hint): ${args.component}`,
-          "List actionable corrections with target selectors when possible. " +
-          "Call out any missing outer box-shadow and its likely offset/blur/color.",
-          "", "CURRENT CSS:", "```css", args.css, "```",
-          args.palette?.length ? `Palette hint: ${args.palette.join(", ")}` : ""
-        ].join("\n");
+    const userPart = { type: "text", text: userTextLines.join("\n") };
 
-      const messages = [
-        { role: "system", content: sysCrit },
-        { role: "user",
-          content: [
-            { type: "text", text: usr },
-            { type: "image_url", image_url: { url: args.image, detail: "high" } }
-          ]
-        }
-      ];
-      const params = buildChatParams({ model, messages, kind: "critique" });
-      const r = await client.chat.completions.create(params);
-      return textOnly(r?.choices?.[0]?.message?.content || "");
-    }
+    const messages = usingImage
+      ? [
+          { role: "system", content: sys },
+          { role: "user", content: [userPart, { type: "image_url", image_url: { url: args.image, detail: "high" } }] }
+        ]
+      : [
+          { role: "system", content: sys },
+          { role: "user", content: [userPart] }
+        ];
 
-    if (kind === "fix") {
-      const usr =
-        [
-          `Fix ${args.cycle}/${args.total} for the component.`,
-          `SCOPE CLASS: ${args.scope}`, `COMPONENT TYPE (hint): ${args.component}`,
-          "Rules:",
-          "- Keep all selectors under the scope.",
-          "- No body/html/universal selectors. No page-level layout.",
-          "- Adjust borders, radius, colors, gradients, typography, and shadows to match the screenshot.",
-          "", "CRITIQUE:", args.critique || "(none)",
-          "", "CURRENT CSS:", "```css", args.css, "```",
-          args.palette?.length ? `Palette hint (optional): ${args.palette.join(", ")}` : ""
-        ].join("\n");
+    const params = buildChatParams({ model: modelForThisCall, messages, kind });
+    const r = await client.chat.completions.create(params);
 
-      const messages = [
-        { role: "system", content: sysFix },
-        { role: "user",
-          content: [
-            { type: "text", text: usr },
-            { type: "image_url", image_url: { url: args.image, detail: "high" } }
-          ]
-        }
-      ];
-      const params = buildChatParams({ model, messages, kind: "fix" });
-      const r = await client.chat.completions.create(params);
-      return cssOnly(r?.choices?.[0]?.message?.content || args.css);
-    }
-
-    throw new Error(`Unknown kind: ${kind}`);
+    return (kind === "critique")
+      ? textOnly(r?.choices?.[0]?.message?.content || "")
+      : cssOnly(r?.choices?.[0]?.message?.content || (kind === "fix" ? args.css : ""));
   };
 
-  return { getUsableModel, callOnce };
+  return { resolveModel, callOnce };
 }
 
-/* ---------- shadow ensure ---------- */
-async function ensureDropShadow(callOnce, { model, image, css, scope, component }) {
-  // if already present, keep
-  if (/\bbox-shadow\b/i.test(css)) return css;
+/* ---------------- Recovery wrappers ---------------- */
 
-  const critique = "The screenshot shows a visible cast drop shadow below and slightly to the right of the component. " +
-                   "Add an outer box-shadow layer (down/right offset, moderate blur) and retain any inset highlight.";
-  const updated = await callOnce("fix", {
-    model,
-    image,
-    css,
-    critique,
-    palette: [],
-    scope,
-    component,
-    cycle: 0,
-    total: 0,
-    prefer_shadows: true
-  });
+async function safeDraft({ baseModel, image, palette, scope, component, callOnce }) {
+  // 1) try with whatever model they chose (auto-vision fallback inside callOnce)
+  let out = await callOnce("draft", { model: baseModel, image, palette, scope, component });
+  if (out && out.trim()) return out;
 
-  return updated || css;
+  // 2) retry once (same path)
+  out = await callOnce("draft", { model: baseModel, image, palette, scope, component });
+  if (out && out.trim()) return out;
+
+  // 3) explicit vision fallbacks
+  for (const m of ["gpt-4o", "gpt-4o-mini"]) {
+    try {
+      out = await callOnce("draft", { model: m, image, palette, scope, component });
+      if (out && out.trim()) return out;
+    } catch {}
+  }
+
+  // 4) text-only fallback (no image block at all)
+  try {
+    out = await callOnce("draft", { model: "gpt-4o-mini", no_image: true, image: null, palette, scope, component });
+    if (out && out.trim()) return out;
+  } catch {}
+
+  return "";
 }
 
-/* ---------- helpers & CSS post ---------- */
-function clampInt(v,min,max){const n=Number(v);if(Number.isNaN(n))return min;return Math.max(min,Math.min(max,Math.floor(n)));}
+async function safeCritique(args) {
+  try { return await args.callOnce("critique", args); }
+  catch { return ""; }
+}
+
+async function safeFix(args) {
+  try { return await args.callOnce("fix", args); }
+  catch { return args.css || ""; }
+}
+
+/* ---------------- Helpers & post-processing ---------------- */
+
+function clampInt(v, min, max) {
+  const n = Number(v);
+  if (Number.isNaN(n)) return min;
+  return Math.max(min, Math.min(max, Math.floor(n)));
+}
 
 function sendError(res, status, error, details, hint) {
   const payload = { error: String(error || "Unknown") };
@@ -292,42 +302,64 @@ function sendError(res, status, error, details, hint) {
   if (hint) payload.hint = String(hint);
   res.status(status).json(payload);
 }
-function extractErrMsg(err){ if (err?.response?.data) { try { return JSON.stringify(err.response.data);} catch{} return String(err.response.data);} if (err?.message) return err.message; return String(err); }
+function extractErrMsg(err) {
+  if (err?.response?.data) {
+    try { return JSON.stringify(err.response.data); } catch {}
+    return String(err.response.data);
+  }
+  if (err?.message) return err.message;
+  return String(err);
+}
 
-function cssOnly(s=""){ return String(s).replace(/^```(?:css)?\s*/i,"").replace(/```$/i,"").trim(); }
-function textOnly(s=""){ return String(s).replace(/```[\s\S]*?```/g,"").trim(); }
+function cssOnly(text = "") {
+  return String(text).replace(/^```(?:css)?\s*/i, "").replace(/```$/i, "").trim();
+}
+function textOnly(s = "") {
+  return String(s).replace(/```[\s\S]*?```/g, "").trim();
+}
 
-function enforceScope(css="", scope=".comp"){
-  let out = cssOnly(css);
-  out = out.replace(/(^|})\s*([^@}{]+?)\s*\{/g,(m,p1,selectors)=>{
-    const scoped = selectors.split(",").map(s=>s.trim()).map(sel=>{
-      if(!sel || sel.startsWith(scope) || sel.startsWith(":root")) return sel;
-      return `${scope} ${sel}`;
-    }).join(", ");
+/** Prefix non-@, non-:root top-level selectors with scope */
+function enforceScope(inputCss = "", scope = ".comp") {
+  let css = cssOnly(inputCss);
+  css = css.replace(/(^|})\s*([^@}{]+?)\s*\{/g, (m, p1, selectors) => {
+    const scoped = selectors
+      .split(",")
+      .map(s => s.trim())
+      .map(sel => (!sel || sel.startsWith(scope) || sel.startsWith(":root")) ? sel : `${scope} ${sel}`)
+      .join(", ");
     return `${p1} ${scoped} {`;
   });
+  return css.trim();
+}
+
+/** Heuristic CSS repair */
+function autofixCss(css = "") {
+  let out = cssOnly(css);
+  out = out.replace(/\/\*+\s*START_CSS\s*\*+\//gi, "");  // strip markers
+  out = out.replace(/,\s*(;|\})/g, "$1");                // fix dangling commas
+  // remove zero-alpha shadow layers
+  out = out.replace(/(box-shadow\s*:\s*)([^;]+);/gi, (m, p, val) => {
+    const cleaned = val.split(/\s*,\s*/).filter(layer => !/rgba?\([^)]*,\s*0(?:\.0+)?\)/i.test(layer)).join(", ");
+    return `${p}${cleaned};`;
+  });
+  out = out.replace(/([^;\{\}\s])\s*\}/g, "$1; }");      // ensure semicolons
+  const open = (out.match(/\{/g) || []).length;
+  const close = (out.match(/\}/g) || []).length;
+  if (open > close) out += "}".repeat(open - close);     // balance braces
   return out.trim();
 }
 
-function autofixCss(css=""){
-  let out = cssOnly(css);
-  out = out.replace(/\/\*+\s*START_CSS\s*\*+\//gi,"");
-  out = out.replace(/,\s*(;|\})/g,"$1");
-  out = out.replace(/(box-shadow\s*:\s*)([^;]+);/gi,(m,p,val)=>{
-    const cleaned = val.split(/\s*,\s*/).filter(layer=>!/rgba?\([^)]*,\s*0(?:\.0+)?\)/i.test(layer)).join(", ");
-    return `${p}${cleaned};`;
-  });
-  out = out.replace(/([^;\{\}\s])\s*\}/g,"$1; }");
-  const open=(out.match(/\{/g)||[]).length, close=(out.match(/\}/g)||[]).length;
-  if(open>close) out += "}".repeat(open-close);
-  return out.trim();
-}
-function flattenGradients(css="", solid=""){
+function flattenGradients(css = "", solid = "") {
   const color = solid && /^#|rgb|hsl|var\(/i.test(solid) ? solid : null;
   let out = css.replace(/background-image\s*:\s*linear-gradient\([^;]+;/gi, m => color ? `background-color: ${color};` : m);
   out = out.replace(/background\s*:\s*linear-gradient\([^;]+;/gi, m => color ? `background-color: ${color};` : m);
   return out;
 }
-function minifyCss(css=""){
-  return css.replace(/\s*\/\*[\s\S]*?\*\/\s*/g,"").replace(/\s*([\{\}:;,])\s*/g,"$1").replace(/;}/g,"}").trim();
+
+function minifyCss(css = "") {
+  return css
+    .replace(/\s*\/\*[\s\S]*?\*\/\s*/g, "")
+    .replace(/\s*([\{\}:;,])\s*/g, "$1")
+    .replace(/;}/g, "}")
+    .trim();
 }
