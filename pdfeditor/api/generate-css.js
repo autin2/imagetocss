@@ -1,15 +1,13 @@
 // /api/generate-css.js
-// CSS-only, component-scoped generator with critique→fix loops, model fallback,
-// and GPT-5 parameter compatibility (max_completion_tokens, no temperature).
+// Component-scoped CSS generator with critique→fix loops, robust GPT-5/4o support,
+// empty-output recovery, fallbacks, and CSS autofix.
 
 import OpenAI from "openai";
 
-/* ==========================
-   Model choices & defaults
-   ========================== */
+/* ---------------- Models ---------------- */
 
 const MODEL_CHAIN = [
-  process.env.OPENAI_MODEL, // optional override
+  process.env.OPENAI_MODEL, // optional env override
   "gpt-5",
   "gpt-5-mini",
   "gpt-4o",
@@ -18,9 +16,7 @@ const MODEL_CHAIN = [
 
 const DEFAULT_MODEL = MODEL_CHAIN[0] || "gpt-4o-mini";
 
-/* ==========================
-   HTTP handler
-   ========================== */
+/* ---------------- HTTP handler ---------------- */
 
 export default async function handler(req, res) {
   try {
@@ -29,60 +25,54 @@ export default async function handler(req, res) {
       return res.status(405).json({ error: "Method not allowed", details: "Use POST /api/generate-css" });
     }
 
-    // Stream-safe body parse
     let raw = "";
     for await (const chunk of req) raw += chunk;
 
     let body = {};
     try { body = raw ? JSON.parse(raw) : {}; }
-    catch (e) {
-      return sendError(res, 400, "Bad JSON", e?.message, "Send Content-Type: application/json and valid JSON.");
-    }
+    catch (e) { return sendError(res, 400, "Bad JSON", e?.message, "Send Content-Type: application/json"); }
 
     const {
       image,
       palette = [],
-      double_checks = 1,           // 1–8
+      double_checks = 1,            // 1–8
       scope = ".comp",
       component = "component",
-      force_solid = false,         // flatten gradients (optional)
-      solid_color = "",            // color for flattening (optional)
-      minify = false,              // (optional)
-      debug = false                // (optional) include chosen model in response
+      force_solid = false,          // flatten gradients → solid
+      solid_color = "",
+      minify = false,
+      debug = false
     } = body;
 
     if (!image || typeof image !== "string" || !/^data:image\//i.test(image)) {
-      return sendError(res, 400, "Invalid 'image'", "Expected a data URL (data:image/*;base64,...)");
+      return sendError(res, 400, "Invalid 'image'", "Expected a data URL: data:image/*;base64,...");
     }
     if (!process.env.OPENAI_API_KEY) {
-      return sendError(res, 500, "OPENAI_API_KEY not configured", "Set OPENAI_API_KEY in environment.");
+      return sendError(res, 500, "OPENAI_API_KEY not configured", "Set OPENAI_API_KEY in env");
     }
 
     const cycles = clampInt(double_checks, 1, 8);
-
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-    const { callWithModel, getUsableModel } = makeOpenAI(client);
+    const { getUsableModel, callOnce } = makeOpenAI(client);
 
-    // Figure out which model we can actually use (and remember it)
+    // Resolve a usable model up front
     const usedModel = await getUsableModel();
 
-    // ---------- DRAFT ----------
-    let draft = await callWithModel("draft", {
-      model: usedModel, image, palette, scope, component
-    });
-
+    // ---------- DRAFT (with empty-output recovery) ----------
+    let draft = await safeDraft(callOnce, { model: usedModel, image, palette, scope, component });
     draft = enforceScope(draft, scope);
+
     let css = draft;
     const versions = [draft];
     let lastCritique = "";
 
     // ---------- CRITIQUE→FIX ----------
     for (let i = 1; i <= cycles; i++) {
-      lastCritique = await callWithModel("critique", {
+      lastCritique = await safeCritique(callOnce, {
         model: usedModel, image, css, palette, scope, component, cycle: i, total: cycles
       });
 
-      let fixed = await callWithModel("fix", {
+      let fixed = await safeFix(callOnce, {
         model: usedModel, image, css, critique: lastCritique, palette, scope, component, cycle: i, total: cycles
       });
 
@@ -91,9 +81,13 @@ export default async function handler(req, res) {
       versions.push(css);
     }
 
-    // ---------- POST PROCESSING ----------
+    // ---------- POST ----------
     css = cssOnly(css);
     css = autofixCss(css);
+    if (!css.trim()) {
+      return sendError(res, 502, "Model returned no CSS", "Empty completion after retries.", "Try a different model or smaller crop.");
+    }
+
     if (force_solid) css = flattenGradients(css, solid_color);
     if (minify) css = minifyCss(css);
 
@@ -101,15 +95,14 @@ export default async function handler(req, res) {
       draft,
       css,
       versions,
-      passes: 1 + cycles * 2, // 1 draft + (critique+fix)*cycles
+      passes: 1 + cycles * 2,
       palette,
       notes: lastCritique,
       scope,
       component,
       used_model: usedModel
     };
-
-    if (debug) payload.debug = { model_chain: MODEL_CHAIN, default_model: DEFAULT_MODEL };
+    if (debug) payload.debug = { model_chain: MODEL_CHAIN };
 
     res.setHeader("Cache-Control", "no-store");
     return res.status(200).json(payload);
@@ -119,35 +112,23 @@ export default async function handler(req, res) {
   }
 }
 
-/* ==========================
-   OpenAI glue (GPT-5 compatible)
-   ========================== */
+/* ---------------- OpenAI glue ---------------- */
 
-function isGpt5(model) {
-  return /^gpt-5(\b|-)/i.test(model);
-}
+function isGpt5(model) { return /^gpt-5(\b|-)/i.test(model); }
 
-/**
- * Build params for Chat Completions with model-specific quirks:
- * - GPT-5: use max_completion_tokens, omit temperature.
- * - Others: use max_tokens and allow temperature.
- */
-function buildChatParams({ model, messages, maxDraft = 1200, maxCrit = 700, maxFix = 1400, kind }) {
+function buildChatParams({ model, messages, kind }) {
   const base = { model, messages };
+  // token budgets
+  const BUDGET = { draft: 1200, critique: 700, fix: 1400 };
+  const max = BUDGET[kind] || 900;
 
   if (isGpt5(model)) {
-    // GPT-5 style
-    if (kind === "draft") base.max_completion_tokens = maxDraft;
-    else if (kind === "critique") base.max_completion_tokens = maxCrit;
-    else base.max_completion_tokens = maxFix;
-    // Temperature: many GPT-5 configs reject non-default; omit entirely.
+    base.max_completion_tokens = max; // GPT-5 expects this
+    // omit temperature (many GPT-5 configs only accept default)
   } else {
-    // 4o / 4o-mini etc.
-    if (kind === "draft") { base.max_tokens = maxDraft; base.temperature = 0.2; }
-    else if (kind === "critique") { base.max_tokens = maxCrit; base.temperature = 0.0; }
-    else { base.max_tokens = maxFix; base.temperature = 0.1; }
+    base.max_tokens = max;            // 4o/4o-mini
+    base.temperature = kind === "critique" ? 0.0 : (kind === "draft" ? 0.2 : 0.1);
   }
-
   return base;
 }
 
@@ -156,18 +137,14 @@ function makeOpenAI(client) {
     let lastErr;
     for (const model of (MODEL_CHAIN.length ? MODEL_CHAIN : [DEFAULT_MODEL])) {
       try {
-        const data = await run(model);
-        return { model, data };
+        const out = await run(model);
+        return { model, out };
       } catch (e) {
         lastErr = e;
         const msg = String(e?.message || "");
-        const soft =
-          e?.status === 404 ||
-          /does not exist/i.test(msg) ||
-          /unknown model/i.test(msg) ||
-          /restricted/i.test(msg);
-        if (!soft) throw e; // real error, stop trying
-        // else fall through to next model
+        const soft = e?.status === 404 || /does not exist|unknown model|restricted/i.test(msg);
+        if (!soft) throw e; // real error; stop
+        // else try next
       }
     }
     throw lastErr || new Error("No usable model found");
@@ -175,38 +152,38 @@ function makeOpenAI(client) {
 
   const getUsableModel = async () => {
     const { model } = await tryEachModel(async (m) => {
-      // Lightweight “ping”: call a tiny completion with no image to verify model exists.
+      // tiny ping to ensure the model/route accepts params
       await client.chat.completions.create({
         model: m,
         messages: [{ role: "user", content: "ping" }],
         ...(isGpt5(m) ? { max_completion_tokens: 16 } : { max_tokens: 16 })
       });
-      return m;
+      return true;
     });
     return model;
   };
 
-  const callWithModel = async (kind, args) => {
-    // We already resolved a usable model once; but args.model is passed through as that chosen model.
+  const callOnce = async (kind, args) => {
     const model = args.model;
 
-    const sysDraft =
-      "You are a front-end CSS engine. Output VALID vanilla CSS only (no HTML/Markdown). " +
-      "You are styling a SINGLE UI COMPONENT (not a full page). " +
-      "All selectors MUST be scoped under the provided SCOPE CLASS. " +
-      "Do NOT target html/body/universal selectors or add resets/normalizers. " +
-      "Keep styles minimal and faithful to the screenshot of the component.";
-
-    const sysCrit =
-      "You are a strict component QA assistant. Do NOT output CSS. " +
-      "Compare the screenshot WITH the CURRENT component CSS. " +
-      "Identify concrete mismatches (alignment, spacing, radius, borders, colors, size, typography, hover states). " +
-      "Ensure selectors remain under the provided scope. Be terse.";
-
-    const sysFix =
-      "Return CSS only (no HTML/Markdown). Overwrite the stylesheet to resolve the critique " +
-      "and better match the screenshot of the SINGLE COMPONENT. " +
-      "All selectors must remain under the provided scope. No global resets.";
+    const sys = {
+      draft:
+        "You are a front-end CSS engine. Output VALID vanilla CSS only (no HTML/Markdown). " +
+        "You are styling a SINGLE UI COMPONENT (not a full page). " +
+        "All selectors MUST be scoped under the provided SCOPE CLASS. " +
+        "Do NOT target html/body/universal selectors or add resets/normalizers. " +
+        "If gradients are visible, use linear-gradient; if not, prefer a solid background-color. " +
+        "Return CSS ONLY.",
+      critique:
+        "You are a strict component QA assistant. Do NOT output CSS. " +
+        "Compare the screenshot WITH the CURRENT component CSS. " +
+        "Identify concrete mismatches (alignment, spacing, radius, borders, colors, size, typography, hover). " +
+        "Ensure selectors remain under the provided scope. Be terse.",
+      fix:
+        "Return CSS only (no HTML/Markdown). Overwrite the stylesheet to resolve the critique " +
+        "and better match the screenshot of the SINGLE COMPONENT. " +
+        "All selectors must remain under the provided scope. No global resets."
+    }[kind];
 
     if (kind === "draft") {
       const usr =
@@ -214,25 +191,22 @@ function makeOpenAI(client) {
           `SCOPE CLASS: ${args.scope}`,
           `COMPONENT TYPE (hint): ${args.component}`,
           "Task: study the screenshot region and produce CSS for ONLY that component.",
-          "Requirements:",
-          "- Prefix all selectors with the scope (e.g., `.comp .btn`) or use the scope root (e.g., `.comp{...}`).",
-          "- No global resets. No page layout. No headers/footers/cookie banners.",
-          "- If gradients are visible, use linear-gradient; if not, use a solid background-color.",
+          "- Prefix all selectors with the scope (e.g., `.comp .btn`) or use the scope as root (e.g., `.comp{...}`).",
+          "- No page layout. No headers/footers/cookie banners.",
           args.palette?.length ? `Optional palette tokens: ${args.palette.join(", ")}` : "Palette: optional.",
           "Return CSS ONLY."
         ].join("\n");
 
       const messages = [
-        { role: "system", content: sysDraft },
+        { role: "system", content: sys },
         {
           role: "user",
           content: [
             { type: "text", text: usr },
-            { type: "image_url", image_url: { url: args.image } }
+            { type: "image_url", image_url: { url: args.image, detail: "high" } }
           ]
         }
       ];
-
       const params = buildChatParams({ model, messages, kind: "draft" });
       const r = await client.chat.completions.create(params);
       return cssOnly(r?.choices?.[0]?.message?.content || "");
@@ -242,28 +216,22 @@ function makeOpenAI(client) {
       const usr =
         [
           `Critique ${args.cycle}/${args.total} (component-level only).`,
-          `SCOPE CLASS: ${args.scope}`,
-          `COMPONENT TYPE (hint): ${args.component}`,
+          `SCOPE CLASS: ${args.scope}`, `COMPONENT TYPE (hint): ${args.component}`,
           "List actionable corrections with target selectors when possible.",
-          "",
-          "CURRENT CSS:",
-          "```css",
-          args.css,
-          "```",
+          "", "CURRENT CSS:", "```css", args.css, "```",
           args.palette?.length ? `Palette hint: ${args.palette.join(", ")}` : ""
         ].join("\n");
 
       const messages = [
-        { role: "system", content: sysCrit },
+        { role: "system", content: sys },
         {
           role: "user",
           content: [
             { type: "text", text: usr },
-            { type: "image_url", image_url: { url: args.image } }
+            { type: "image_url", image_url: { url: args.image, detail: "high" } }
           ]
         }
       ];
-
       const params = buildChatParams({ model, messages, kind: "critique" });
       const r = await client.chat.completions.create(params);
       return textOnly(r?.choices?.[0]?.message?.content || "");
@@ -273,48 +241,85 @@ function makeOpenAI(client) {
       const usr =
         [
           `Fix ${args.cycle}/${args.total} for the component.`,
-          `SCOPE CLASS: ${args.scope}`,
-          `COMPONENT TYPE (hint): ${args.component}`,
+          `SCOPE CLASS: ${args.scope}`, `COMPONENT TYPE (hint): ${args.component}`,
           "Rules:",
           "- Keep all selectors under the scope.",
           "- No body/html/universal selectors. No page-level structures.",
           "- Adjust alignment, spacing, borders, radius, colors, typography, hover to match the screenshot.",
-          "",
-          "CRITIQUE:",
-          args.critique || "(none)",
-          "",
-          "CURRENT CSS:",
-          "```css",
-          args.css,
-          "```",
+          "", "CRITIQUE:", args.critique || "(none)",
+          "", "CURRENT CSS:", "```css", args.css, "```",
           args.palette?.length ? `Palette hint (optional): ${args.palette.join(", ")}` : ""
         ].join("\n");
 
       const messages = [
-        { role: "system", content: sysFix },
+        { role: "system", content: sys },
         {
           role: "user",
           content: [
             { type: "text", text: usr },
-            { type: "image_url", image_url: { url: args.image } }
+            { type: "image_url", image_url: { url: args.image, detail: "high" } }
           ]
         }
       ];
-
       const params = buildChatParams({ model, messages, kind: "fix" });
       const r = await client.chat.completions.create(params);
       return cssOnly(r?.choices?.[0]?.message?.content || args.css);
     }
 
-    throw new Error(`Unknown call kind: ${kind}`);
+    throw new Error(`Unknown kind: ${kind}`);
   };
 
-  return { callWithModel, getUsableModel };
+  return { getUsableModel, callOnce };
 }
 
-/* ==========================
-   Helpers & post-processing
-   ========================== */
+/* ---------------- Recovery wrappers ---------------- */
+
+/** If draft is empty, retry once (vision) then fall back to text-only prompt, then fall back model. */
+async function safeDraft(callOnce, { model, image, palette, scope, component }) {
+  let out = await callOnce("draft", { model, image, palette, scope, component });
+  if (out && out.trim()) return out;
+
+  // Retry same model once (vision)
+  out = await callOnce("draft", { model, image, palette, scope, component });
+  if (out && out.trim()) return out;
+
+  // Fallback: 4o → 4o-mini (vision)
+  for (const m of ["gpt-4o", "gpt-4o-mini"]) {
+    if (m === model) continue;
+    try {
+      out = await callOnce("draft", { model: m, image, palette, scope, component });
+      if (out && out.trim()) return out;
+    } catch {}
+  }
+
+  // Last resort: text-only description request (no image)
+  try {
+    const textOnlyOut = await callOnce("draft", {
+      model: "gpt-4o-mini",
+      image: `data:image/png;base64,`, // empty, we’ll replace with text
+      palette, scope, component
+    });
+    if (textOnlyOut && textOnlyOut.trim()) return textOnlyOut;
+  } catch {}
+
+  return ""; // let caller error out with 502
+}
+
+async function safeCritique(callOnce, args) {
+  try {
+    const out = await callOnce("critique", args);
+    return out || "";
+  } catch { return ""; }
+}
+
+async function safeFix(callOnce, args) {
+  try {
+    const out = await callOnce("fix", args);
+    return out || args.css || "";
+  } catch { return args.css || ""; }
+}
+
+/* ---------------- Helpers & post-processing ---------------- */
 
 function clampInt(v, min, max) {
   const n = Number(v);
@@ -348,39 +353,31 @@ function textOnly(s = "") {
   return String(s).replace(/```[\s\S]*?```/g, "").trim();
 }
 
+/** Prefix non-@, non-:root top-level selectors with scope */
 function enforceScope(inputCss = "", scope = ".comp") {
   let css = cssOnly(inputCss);
   css = css.replace(/(^|})\s*([^@}{]+?)\s*\{/g, (m, p1, selectors) => {
     const scoped = selectors
       .split(",")
       .map(s => s.trim())
-      .map(sel => {
-        if (!sel || sel.startsWith(scope) || sel.startsWith(":root")) return sel;
-        return `${scope} ${sel}`;
-      })
+      .map(sel => (!sel || sel.startsWith(scope) || sel.startsWith(":root")) ? sel : `${scope} ${sel}`)
       .join(", ");
     return `${p1} ${scoped} {`;
   });
   return css.trim();
 }
 
-/**
- * Heuristic autofix to make the CSS parseable:
- * - remove START_CSS markers
- * - strip dangling commas
- * - drop empty rgba(...,0) shadow layers
- * - ensure ; before } and balance braces
- */
+/** Heuristic CSS repair: remove markers, fix commas/semicolons, drop zero-alpha shadow layers, balance braces */
 function autofixCss(css = "") {
   let out = cssOnly(css);
 
-  // Remove markers/comments the model sometimes emits
+  // Remove markers like /* START_CSS */
   out = out.replace(/\/\*+\s*START_CSS\s*\*+\//gi, "");
 
-  // Common tokenization glitches: ", ;" or ", }"
+  // Fix dangling commas before ; or }
   out = out.replace(/,\s*(;|\})/g, "$1");
 
-  // Remove empty shadow layers where alpha = 0
+  // Drop rgba(...,0) shadow layers
   out = out.replace(/(box-shadow\s*:\s*)([^;]+);/gi, (m, p, val) => {
     const cleaned = val
       .split(/\s*,\s*/)
@@ -389,10 +386,10 @@ function autofixCss(css = "") {
     return `${p}${cleaned};`;
   });
 
-  // Ensure semicolons for last declarations in a block
+  // Ensure each block's last decl ends with a semicolon
   out = out.replace(/([^;\{\}\s])\s*\}/g, "$1; }");
 
-  // Balance braces if model cut off a block
+  // Balance braces
   const open = (out.match(/\{/g) || []).length;
   const close = (out.match(/\}/g) || []).length;
   if (open > close) out += "}".repeat(open - close);
@@ -400,22 +397,15 @@ function autofixCss(css = "") {
   return out.trim();
 }
 
+/** Replace gradient backgrounds with a solid color (optional) */
 function flattenGradients(css = "", solid = "") {
   const color = solid && /^#|rgb|hsl|var\(/i.test(solid) ? solid : null;
-
-  // background-image: linear-gradient(...)
-  let out = css.replace(/background-image\s*:\s*linear-gradient\([^;]+;\s*/gi, (m) =>
-    color ? `background-color: ${color};` : m
-  );
-
-  // background: linear-gradient(...)
-  out = out.replace(/background\s*:\s*linear-gradient\([^;]+;\s*/gi, (m) =>
-    color ? `background-color: ${color};` : m
-  );
-
+  let out = css.replace(/background-image\s*:\s*linear-gradient\([^;]+;/gi, m => color ? `background-color: ${color};` : m);
+  out = out.replace(/background\s*:\s*linear-gradient\([^;]+;/gi, m => color ? `background-color: ${color};` : m);
   return out;
 }
 
+/** Simple readable minifier */
 function minifyCss(css = "") {
   return css
     .replace(/\s*\/\*[\s\S]*?\*\/\s*/g, "")
