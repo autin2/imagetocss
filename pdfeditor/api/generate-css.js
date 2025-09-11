@@ -1,21 +1,22 @@
 // /pages/api/generate-css.js
-// Pixel-faithful, component-scoped CSS from an image, with robust fallbacks.
-// IMPORTANT: disable Next bodyParser because we read the raw stream ourselves.
+// Image → CSS (literal). Pill-aware facts → CSS builder with strict scoping.
+// IMPORTANT: disable Next body parser; we read the stream ourselves.
 export const config = { api: { bodyParser: false } };
 
 import OpenAI from "openai";
 
 /* ---------------- Model selection ---------------- */
 const MODEL_CHAIN = [
-  process.env.OPENAI_MODEL,    // optional override, e.g. "gpt-5", "gpt-5-mini"
-  "gpt-5", "gpt-5-mini",       // will be used only if enabled on your account
+  process.env.OPENAI_MODEL,   // optional override: "gpt-5", "gpt-5-mini", etc.
+  "gpt-5",
+  "gpt-5-mini",
   "gpt-4o",
   "gpt-4o-mini",
 ].filter(Boolean);
 
-const isGpt5 = (m) => /^gpt-5(\b|-)/i.test(m || "");
-const is4o = (m) => /^gpt-4o(-mini)?$/i.test(m || "");
-const supportsVision = is4o;   // vision images via chat.completions content parts
+const isGpt5   = (m) => /^gpt-5(\b|-)/i.test(m || "");
+const is4o     = (m) => /^gpt-4o(-mini)?$/i.test(m || "");
+const canSee   = is4o; // vision via chat.completions content parts
 
 /* ---------------- HTTP handler ---------------- */
 export default async function handler(req, res) {
@@ -28,7 +29,7 @@ export default async function handler(req, res) {
       return sendError(res, 500, "OPENAI_API_KEY not configured");
     }
 
-    // Read raw JSON body
+    // Read raw JSON
     let raw = "";
     try { for await (const chunk of req) raw += chunk; }
     catch (e) { return sendError(res, 400, "Failed to read request body", e?.message); }
@@ -47,30 +48,28 @@ export default async function handler(req, res) {
       return sendError(res, 400, "Send { image: dataUrl, scope?, component? }");
     }
     if (image.length > 16_000_000) {
-      return sendError(res, 413, "Image too large; please send a smaller crop.");
+      return sendError(res, 413, "Image too large; please crop smaller.");
     }
 
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const { resolveModel, callOnce } = wrapOpenAI(client);
-    const model = await resolveModel();         // e.g., "gpt-5" or "gpt-4o"
+    const model = await resolveModel();
 
-    // 1) FACTS from screenshot (vision JSON)
+    // 1) FACTS (vision JSON)
     const facts = await passFacts({ model, image, scope, component, callOnce });
 
     // 2) CSS from facts (literal)
     let css = await passCssFromFacts({ model, image, scope, component, facts, callOnce });
 
-    // If CSS empty, try a strict repair prompt
+    // Fallback repair if empty
     if (!css || !css.trim()) {
       css = await passCssRepair({ model, image, scope, component, facts, callOnce });
     }
-
-    // If still empty, last-ditch on 4o-mini
     if (!css || !css.trim()) {
       css = await passCssFromFacts({ model: "gpt-4o-mini", image, scope, component, facts, callOnce });
     }
 
-    // 3) Scope + auto-repair braces/semicolons
+    // 3) Scope + final repairs
     css = enforceScope(css, scope);
     css = autofixCss(css);
 
@@ -78,7 +77,7 @@ export default async function handler(req, res) {
       return sendError(res, 502, "Model returned no CSS", "Empty after repairs");
     }
 
-    // 4) Minimal HTML stub that fits selectors & visible text
+    // 4) HTML snippet that fits selectors & visible text
     const html = suggestHtml(css, scope, facts);
 
     res.setHeader("Cache-Control", "no-store");
@@ -97,62 +96,65 @@ function wrapOpenAI(client) {
       catch (e) {
         lastErr = e;
         const msg = String(e?.message || "");
-        const soft = e?.status === 404 || /unknown|does not exist|restricted|Unsupported model/i.test(msg);
-        if (!soft) throw e; // real failure (auth/network)
+        const soft = e?.status === 404 || /unknown|does not exist|restricted|Unsupported/i.test(msg);
+        if (!soft) throw e; // real failure
       }
     }
     throw lastErr || new Error("No usable model");
   }
-
   async function resolveModel() {
-    // Probe the model with a tiny ping
     return tryEach(async (m) => {
       const probe = { model: m, messages: [{ role: "user", content: "ping" }] };
-      if (isGpt5(m)) probe.max_completion_tokens = 8;
-      else probe.max_tokens = 8;
+      if (isGpt5(m)) probe.max_completion_tokens = 8; else probe.max_tokens = 8;
       await client.chat.completions.create(probe);
     });
   }
-
   async function callOnce(kind, { model, messages }) {
     const budgets = { facts: 900, css: 1600 };
     const p = { model, messages };
-    if (isGpt5(model)) {
-      p.max_completion_tokens = budgets[kind] || 900;  // GPT-5 param
-    } else {
-      p.max_tokens = budgets[kind] || 900;             // 4o/4o-mini param
-      p.temperature = kind === "facts" ? 0 : 0.1;
-    }
+    if (isGpt5(model)) p.max_completion_tokens = budgets[kind] || 900;
+    else { p.max_tokens = budgets[kind] || 900; p.temperature = kind === "facts" ? 0 : 0.1; }
     const r = await client.chat.completions.create(p);
     return r?.choices?.[0]?.message?.content ?? "";
   }
-
   return { resolveModel, callOnce };
 }
 
 /* ---------------- Passes ---------------- */
-
 async function passFacts({ model, image, scope, component, callOnce }) {
   const sys =
-    "Return JSON ONLY. Describe objective style facts of ONE UI component screenshot. " +
-    "Hex colors only. If not visible, leave empty/false. JSON must match the schema exactly.";
+    "Return JSON ONLY. Describe objective, measurable style facts of ONE UI component screenshot. " +
+    "Hex colors only. If not visible, leave empty/false. JSON must match the schema exactly. " +
+    "Do NOT invent gradients or shadows.";
 
+  // Pill-aware schema; explicit bg kind and caret detection.
   const schema = `
 {
-  "has_gradient": boolean,
+  "bg_kind": "solid" | "gradient" | "transparent",
+  "background_color": string,              // hex if bg_kind=solid else ""
+  "has_gradient": boolean,                 // duplicate convenience flag
   "gradient_direction": "to bottom" | "to right" | "to left" | "to top" | "",
   "gradient_stops": [ { "pos": number, "color": string } ],
-  "background_color": string,
+
+  "border_present": boolean,
   "border_color": string,
   "border_width_px": number,
   "border_radius_px": number,
+  "is_pill": boolean,                      // true if ends fully rounded (chip)
+  "pill_radius_px": number,                // measured max radius if pill
+
   "shadow": { "x_px": number, "y_px": number, "blur_px": number, "spread_px": number, "color": string },
+
   "text_color": string,
   "font_size_px": number,
-  "font_weight": number,
+  "font_weight": number,                   // 400/500/600/700…
   "padding_x_px": number,
   "padding_y_px": number,
   "gap_px": number,
+
+  "caret_visible": boolean,                // ▼ chevron present?
+  "caret_color": string,
+
   "link_color": string,
   "link_underline": boolean,
 
@@ -164,50 +166,46 @@ async function passFacts({ model, image, scope, component, callOnce }) {
   "has_icon": boolean
 }`.trim();
 
-  // Always use a vision model for the Facts pass
-  const visionModel = supportsVision(model) ? model : "gpt-4o";
   const userText =
     `SCOPE: ${scope}\nCOMPONENT: ${component}\n` +
-    "Return literal measured values. Colors must be #RRGGBB. Round px to integers.\n" +
-    "Use this schema exactly:\n" + schema;
+    "Measure literally. If the chip is a pill with white background and subtle gray border, " +
+    "set is_pill=true, bg_kind='solid', background_color='#FFFFFF', border_present=true, border_color near #E5E7EB. " +
+    "Only set gradient if there are >=2 distinct stops (ΔL* > 10). Round pixels to integers.\n\n" + schema;
 
   const messages = [
     { role: "system", content: sys },
-    {
-      role: "user",
-      content: [
+    { role: "user", content: [
         { type: "text", text: userText },
         { type: "image_url", image_url: { url: image, detail: "high" } }
-      ]
-    }
+      ] }
   ];
 
-  const raw = await callOnce("facts", { model: visionModel, messages });
-  const obj = tryParseJson(raw) || {};
-  return normalizeFacts(obj);
+  const visModel = canSee(model) ? model : "gpt-4o";
+  const raw = await callOnce("facts", { model: visModel, messages });
+  return normalizeFacts(tryParseJson(raw));
 }
 
 async function passCssFromFacts({ model, image, scope, component, facts, callOnce }) {
   const sys =
     "Output VALID vanilla CSS only (no HTML/Markdown). Build styles literally from FACTS. " +
-    "All selectors must be under SCOPE. No resets.";
+    "All selectors must be under SCOPE. No resets. No creativity.";
 
   const instructions =
     `SCOPE: ${scope}\nCOMPONENT: ${component}\n` +
-    "- If has_gradient is true, use linear-gradient with gradient_direction & gradient_stops.\n" +
-    "- Else use background-color.\n" +
-    "- Apply border (width/color), border-radius, shadow if present, text color/size/weight, paddings, gap.\n" +
+    "- Use bg_kind to decide background: if 'gradient' use linear-gradient(direction, stops); if 'solid' use background-color; if 'transparent' omit bg.\n" +
+    "- If is_pill, set border-radius to 9999px (or pill_radius_px if larger) and prefer background-color to pure white when indicated.\n" +
+    "- Apply border only if border_present; use width and color.\n" +
+    "- Apply shadow only if color present.\n" +
+    "- Use text_color, font_size_px, font_weight, paddings, gap.\n" +
+    "- If caret_visible, add a `.caret` SVG color using caret_color or a muted gray.\n" +
     "- If link_color present, add a scoped anchor rule; underline if link_underline is true.\n" +
+    "- Add a gentle hover only for white pills: background-color: #f9fafb.\n" +
     "Return CSS ONLY.\n\nFACTS JSON:\n" + JSON.stringify(facts);
 
   const messages = [
     { role: "system", content: sys },
-    // IMPORTANT: if model is NOT vision, send a plain string instead of a content array.
-    supportsVision(model)
-      ? { role: "user", content: [
-          { type: "text", text: instructions },
-          { type: "image_url", image_url: { url: image, detail: "high" } }
-        ] }
+    canSee(model)
+      ? { role: "user", content: [{ type: "text", text: instructions }, { type: "image_url", image_url: { url: image, detail: "high" } }] }
       : { role: "user", content: instructions }
   ];
 
@@ -216,19 +214,16 @@ async function passCssFromFacts({ model, image, scope, component, facts, callOnc
 }
 
 async function passCssRepair({ model, image, scope, component, facts, callOnce }) {
-  const sys = "Return VALID CSS only (no HTML/Markdown). Repair empty or malformed CSS using FACTS. Scope under SCOPE.";
+  const sys = "Return VALID CSS only (no HTML/Markdown). If previous CSS empty, synthesize minimal literal CSS from FACTS. Scope under SCOPE.";
   const instructions =
     `SCOPE: ${scope}\nCOMPONENT: ${component}\n` +
-    "Earlier attempt produced empty CSS. Synthesize minimal but correct CSS from FACTS. " +
-    "Ensure braces/semicolons are correct. Return CSS ONLY.\n\nFACTS JSON:\n" + JSON.stringify(facts);
+    "Build minimal correct CSS from FACTS. Ensure braces/semicolons present. Return CSS ONLY.\n\nFACTS JSON:\n" +
+    JSON.stringify(facts);
 
   const messages = [
     { role: "system", content: sys },
-    supportsVision(model)
-      ? { role: "user", content: [
-          { type: "text", text: instructions },
-          { type: "image_url", image_url: { url: image, detail: "low" } }
-        ] }
+    canSee(model)
+      ? { role: "user", content: [{ type: "text", text: instructions }, { type: "image_url", image_url: { url: image, detail: "low" } }] }
       : { role: "user", content: instructions }
   ];
 
@@ -236,7 +231,7 @@ async function passCssRepair({ model, image, scope, component, facts, callOnce }
   return cssOnly(raw);
 }
 
-/* ---------------- HTML from facts ---------------- */
+/* ---------------- HTML synthesis ---------------- */
 function suggestHtml(css, scope, facts) {
   const className = scope.replace(/^\./, "");
   const parts = [];
@@ -246,106 +241,103 @@ function suggestHtml(css, scope, facts) {
   }
   if (facts?.has_input) {
     const ph = facts?.input_placeholder || "Enter text";
-    parts.push(`<input type="text" placeholder="${escapeHtml(ph)}">`);
+    parts.push(`<input type="text" placeholder="${esc(ph)}">`);
   }
   if (facts?.has_button) {
-    const label = facts?.button_text || "Submit";
-    parts.push(`<button>${escapeHtml(label)}</button>`);
+    const label = facts?.button_text || "Button";
+    parts.push(`<button type="button" aria-haspopup="listbox" aria-expanded="false">` +
+               `<span>${esc(label)}</span>` +
+               (facts?.caret_visible ? caretSvg(facts?.caret_color) : "") +
+               `</button>`);
   }
   if (facts?.has_link) {
-    // Use button_text as a generic label if link text not explicitly detected
-    parts.push(`<a href="#">${escapeHtml(facts?.button_text || "Previous period")}</a>`);
+    parts.push(`<a href="#">${esc(facts?.button_text || "Link")}</a>`);
   }
   if (!parts.length) {
-    parts.push(`<span class="text">${escapeHtml(facts?.button_text || "Label")}</span>`);
+    parts.push(`<button type="button"><span>${esc(facts?.button_text || "Daily")}</span>${caretSvg(facts?.caret_color)}</button>`);
   }
 
-  return `<div class="${className}" role="button" tabindex="0">\n  ${parts.join("\n  ")}\n</div>`;
+  return `<div class="${className}" role="group">\n  ${parts.join("\n  ")}\n</div>`;
+}
+function caretSvg(color) {
+  const fill = color && /^#/.test(color) ? color : "#6b7280";
+  return ` <svg class="caret" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 9l6 6 6-6" stroke="${esc(fill)}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 }
 
 /* ---------------- Utilities ---------------- */
-function cssOnly(s = "") { return String(s).replace(/^```(?:css)?\s*/i, "").replace(/```$/i, "").trim(); }
-function enforceScope(inputCss = "", scope = ".comp") {
+function cssOnly(s=""){ return String(s).replace(/^```(?:css)?\s*/i, "").replace(/```$/i, "").trim(); }
+function enforceScope(inputCss="", scope=".comp"){
   let css = cssOnly(inputCss);
-  css = css.replace(/(^|})\s*([^@}{]+?)\s*\{/g, (m, p1, selectors) => {
-    const scoped = selectors
-      .split(",")
-      .map(s => s.trim())
-      .map(sel => (!sel || sel.startsWith(scope) || sel.startsWith(":root")) ? sel : `${scope} ${sel}`)
-      .join(", ");
+  css = css.replace(/(^|})\s*([^@}{]+?)\s*\{/g,(m,p1,selectors)=>{
+    const scoped = selectors.split(",").map(s=>s.trim()).map(sel =>
+      (!sel || sel.startsWith(scope) || sel.startsWith(":root")) ? sel : `${scope} ${sel}`
+    ).join(", ");
     return `${p1} ${scoped} {`;
   });
   return css.trim();
 }
-function autofixCss(css = "") {
+function autofixCss(css=""){
   let out = cssOnly(css);
-  out = out.replace(/,\s*(;|\})/g, "$1");           // dangling commas
-  out = out.replace(/([^;{}\s])\s*\}/g, "$1; }");  // missing semicolons before }
-  const open = (out.match(/\{/g) || []).length;
-  const close = (out.match(/\}/g) || []).length;
-  if (open > close) out += "}".repeat(open - close);
+  out = out.replace(/,\s*(;|\})/g,"$1");      // trailing commas
+  out = out.replace(/([^;{}\s])\s*\}/g,"$1; }");
+  const open=(out.match(/\{/g)||[]).length, close=(out.match(/\}/g)||[]).length;
+  if(open>close) out += "}".repeat(open-close);
   return out.trim();
 }
-function tryParseJson(s) {
-  try { return JSON.parse(s); } catch {}
-  const m = String(s || "").match(/\{[\s\S]*\}$/);
-  if (m) { try { return JSON.parse(m[0]); } catch {} }
-  return null;
-}
-function normalizeFacts(f) {
-  const n = (v,d=0)=>Number.isFinite(+v)?Math.round(+v):d;
-  const hex = (c)=>typeof c==="string"?c.trim():"";
-  const b = (v)=>!!v;
+function tryParseJson(s){ try{ return JSON.parse(s); }catch{} const m=String(s||"").match(/\{[\s\S]*\}$/); if(m){ try{ return JSON.parse(m[0]); }catch{} } return {}; }
+function normalizeFacts(f){
+  const n=(v,d=0)=>Number.isFinite(+v)?Math.round(+v):d;
+  const hex=(c)=>typeof c==="string"?c.trim():"";
+  const b=(v)=>!!v;
+
   const out = {
+    bg_kind: ["solid","gradient","transparent"].includes(f?.bg_kind) ? f.bg_kind : (f?.has_gradient ? "gradient" : (f?.background_color ? "solid" : "transparent")),
+    background_color: hex(f?.background_color),
     has_gradient: !!f?.has_gradient,
-    gradient_direction: typeof f?.gradient_direction==="string"?f.gradient_direction:"",
+    gradient_direction: typeof f?.gradient_direction==="string" ? f.gradient_direction : "",
     gradient_stops: Array.isArray(f?.gradient_stops) ? f.gradient_stops.map(s=>({
-      pos: Number.isFinite(+s?.pos) ? Math.max(0, Math.min(1, +s.pos)) : 0,
+      pos: Number.isFinite(+s?.pos) ? Math.max(0,Math.min(1,+s.pos)) : 0,
       color: hex(s?.color)
     })) : [],
-    background_color: hex(f?.background_color),
+
+    border_present: b(f?.border_present),
     border_color: hex(f?.border_color),
     border_width_px: n(f?.border_width_px, 1),
     border_radius_px: n(f?.border_radius_px, 8),
-    shadow: {
-      x_px: n(f?.shadow?.x_px, 0),
-      y_px: n(f?.shadow?.y_px, 0),
-      blur_px: n(f?.shadow?.blur_px, 0),
-      spread_px: n(f?.shadow?.spread_px, 0),
-      color: hex(f?.shadow?.color || "")
-    },
+    is_pill: b(f?.is_pill),
+    pill_radius_px: n(f?.pill_radius_px, 9999),
+
+    shadow: { x_px:n(f?.shadow?.x_px,0), y_px:n(f?.shadow?.y_px,0), blur_px:n(f?.shadow?.blur_px,0), spread_px:n(f?.shadow?.spread_px,0), color: hex(f?.shadow?.color||"") },
+
     text_color: hex(f?.text_color || "#111827"),
-    font_size_px: n(f?.font_size_px, 14),
-    font_weight: n(f?.font_weight, 600),
-    padding_x_px: n(f?.padding_x_px, 12),
-    padding_y_px: n(f?.padding_y_px, 6),
-    gap_px: n(f?.gap_px, 8),
+    font_size_px: n(f?.font_size_px,14),
+    font_weight: n(f?.font_weight,500), // prefer 500 default for chips
+    padding_x_px: n(f?.padding_x_px,12),
+    padding_y_px: n(f?.padding_y_px,6),
+    gap_px: n(f?.gap_px,8),
+
+    caret_visible: b(f?.caret_visible),
+    caret_color: hex(f?.caret_color || "#6b7280"),
+
     link_color: hex(f?.link_color || ""),
     link_underline: b(f?.link_underline),
+
     button_text: typeof f?.button_text==="string" ? f.button_text : "",
     input_placeholder: typeof f?.input_placeholder==="string" ? f.input_placeholder : "",
     has_button: b(f?.has_button),
     has_input: b(f?.has_input),
     has_link: b(f?.has_link),
-    has_icon: b(f?.has_icon)
+    has_icon: b(f?.has_icon),
   };
-  if (!out.has_gradient || !out.gradient_stops.length) {
-    out.has_gradient = false; out.gradient_direction = ""; out.gradient_stops = [];
+
+  // Normalize bg flags
+  if (out.bg_kind === "gradient" && !out.gradient_stops.length) out.bg_kind = "transparent";
+  if (out.is_pill && out.bg_kind === "transparent") {
+    // Common case: white pill; default to white if border looks present.
+    if (out.border_present) { out.bg_kind = "solid"; out.background_color = out.background_color || "#FFFFFF"; }
   }
   return out;
 }
-function escapeHtml(s=""){ return String(s).replace(/[&<>"']/g, m => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m])); }
-
-/* ---------------- Error helpers ---------------- */
-function sendError(res, status, error, details) {
-  const payload = { error: String(error || "Unknown") };
-  if (details) payload.details = String(details);
-  res.status(status).json(payload);
-}
-function extractErr(err) {
-  if (err?.response?.data) {
-    try { return JSON.stringify(err.response.data); } catch {}
-    return String(err.response.data);
-  }
-  return String(err?.message || err);
-}
+function esc(s=""){ return String(s).replace(/[&<>"']/g,m=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[m])); }
+function sendError(res,status,error,details){ const p={ error:String(error||"Unknown") }; if(details) p.details=String(details); res.status(status).json(p); }
+function extractErr(e){ if(e?.response?.data){ try{ return JSON.stringify(e.response.data); }catch{} return String(e.response.data); } return String(e?.message||e); }
