@@ -119,7 +119,7 @@ export default async function handler(req, res) {
 
     draft = enforceScope(draft, scopeSan);
 
-    // NEW: strip stray selector tokens before we do other repairs
+    // Strip stray selector tokens before other repairs
     draft = dropStraySelectors(draft);
 
     const repairedDraft = repairCss(draft);
@@ -158,7 +158,7 @@ export default async function handler(req, res) {
 
       fixed = enforceScope(fixed, scopeSan);
 
-      // NEW: strip stray selector tokens again (fix pass can reintroduce)
+      // Strip stray selector tokens again (fix pass can reintroduce)
       fixed = dropStraySelectors(fixed);
 
       const repairedFixed = repairCss(fixed);
@@ -200,7 +200,6 @@ export default async function handler(req, res) {
     return res.status(200).json(out);
 
   } catch (err) {
-    // Surface useful details
     console.error("generate-css error:", err);
     const status = Number(err?.status || err?.code || 500);
     const details = err?.error?.message || err?.message || "Unknown error";
@@ -279,8 +278,6 @@ function solidifyCss(css = "", hex = "#cccccc") {
 
 /** Remove standalone selector tokens (lines w/ no `{`, `}`, or `:`). */
 function dropStraySelectors(css = "") {
-  // Remove lines that look like selectors but are not followed by a rule block or declaration
-  // Avoid @-rules, keyframe steps, 'from'/'to', and comment lines.
   const re = /^[ \t]*(?!@)(?!\d+%)(?!from\b)(?!to\b)(?!\/\*)(?!\*)[^:{}\n]+?[ \t]*$/gm;
   return css.replace(re, "").replace(/\n{2,}/g, "\n").trim();
 }
@@ -345,8 +342,8 @@ function mergeShadowFragments(css = "", prop = "box-shadow") {
   do {
     prev = out;
     out = out.replace(re, (_m, head, a, b) => {
-      const left = a.trim().replace(/,\s*$/,"");   // strip trailing comma
-      const right = b.trim().replace/^,\s*/,"");   // strip leading comma
+      const left = a.trim().replace(/,\s*$/,"");    // strip trailing comma
+      const right = b.trim().replace(/^,\s*/,"");   // strip leading comma  <-- fixed
       return `${head}${left}, ${right};`;
     });
   } while (out !== prev);
