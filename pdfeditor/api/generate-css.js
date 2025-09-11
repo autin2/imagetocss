@@ -1,40 +1,50 @@
 // /api/generate-css.js
-// Component-scoped CSS generator with critique→fix loops, robust GPT-5/4o support,
-// empty-output recovery (vision fallback + text-only), CSS autofix,
-// and a final pass that returns a WORKING HTML snippet for the styles.
-// HTML generation now uses the IMAGE (so button text like "Subscribe" is preserved)
-// and post-fills any elements implied by CSS (e.g., generic ".comp input { ... }").
+// Pixel-faithful, component-scoped CSS from an image.
+// Pipeline:
+// 1) FACTS (JSON from screenshot)  -> 2) BUILD CSS from facts (literal) -> 3) QA/repair
+// Also returns a minimal HTML snippet that covers all selectors in the CSS
+// (buttons, inputs, anchors, icons, etc.) with text pulled from the image when visible.
 //
 // ENV:
-//   OPENAI_API_KEY (required)
-//   OPENAI_MODEL   (optional) one of: gpt-5, gpt-5-mini, gpt-4o, gpt-4o-mini
+//   OPENAI_API_KEY  (required)
+//   OPENAI_MODEL    (optional) prefer "gpt-5" or "gpt-5-mini"; falls back to "gpt-4o" / "gpt-4o-mini"
 //
-// Response:
-//   { draft, css, html, versions, passes, palette, notes, scope, component, used_model }
+// POST body:
+//   { image: dataUrl, scope?: ".comp", component?: "button", double_checks?: 1 }
+//
+// Response 200:
+//   { css, html, facts, scope, component, used_model }
+//
+// Notes:
+// - This version is “literal”: gradients only if clearly present, exact colors/sizes,
+//   link styling when a link is visible, measured paddings/border/shadows, etc.
 
 import OpenAI from "openai";
 
-/* ---------------- Models ---------------- */
+/* ---------------- Model selection ---------------- */
 const MODEL_CHAIN = [
-  process.env.OPENAI_MODEL, // optional override
+  process.env.OPENAI_MODEL,
   "gpt-5",
   "gpt-5-mini",
   "gpt-4o",
-  "gpt-4o-mini"
+  "gpt-4o-mini",
 ].filter(Boolean);
 
 const DEFAULT_MODEL = MODEL_CHAIN[0] || "gpt-4o-mini";
 
-/* Heuristic: models that reliably support image_url in Chat Completions */
-function supportsVision(model) { return /gpt-4o(-mini)?$/i.test(model); }
-function isGpt5(m){ return /^gpt-5(\b|-)/i.test(m); }
+function isGpt5(m) { return /^gpt-5(\b|-)/i.test(m || ""); }
+function supportsVision(m) { return /gpt-4o(-mini)?$/i.test(m || ""); }
 
 /* ---------------- HTTP handler ---------------- */
 export default async function handler(req, res) {
   try {
     if (req.method !== "POST") {
       res.setHeader("Allow", "POST");
-      return res.status(405).json({ error: "Method not allowed", details: "Use POST /api/generate-css" });
+      return res.status(405).json({ error: "Method not allowed" });
+    }
+
+    if (!process.env.OPENAI_API_KEY) {
+      return sendError(res, 500, "OPENAI_API_KEY not configured");
     }
 
     let raw = "";
@@ -42,401 +52,313 @@ export default async function handler(req, res) {
 
     let body = {};
     try { body = raw ? JSON.parse(raw) : {}; }
-    catch (e) { return sendError(res, 400, "Bad JSON", e?.message, "Send Content-Type: application/json"); }
+    catch (e) { return sendError(res, 400, "Bad JSON", e?.message); }
 
     const {
       image,
-      palette = [],
-      double_checks = 1,            // 1–8
       scope = ".comp",
       component = "component",
-      force_solid = false,          // optional: replace gradients with solid
-      solid_color = "",             // optional solid color
-      minify = false,               // optional minify result
-      debug = false
-    } = body;
+      double_checks = 1
+    } = body || {};
 
     if (!image || typeof image !== "string" || !/^data:image\//i.test(image)) {
-      return sendError(res, 400, "Invalid 'image'", "Expected data URL: data:image/*;base64,...");
-    }
-    if (!process.env.OPENAI_API_KEY) {
-      return sendError(res, 500, "OPENAI_API_KEY not configured");
+      return sendError(res, 400, "Send { image: dataUrl, ... }");
     }
 
-    const cycles = clampInt(double_checks, 1, 8);
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const { resolveModel, callOnce } = makeOpenAI(client);
 
-    // Resolve a usable base model (text). Vision may still be switched per call.
     const baseModel = await resolveModel();
 
-    // ---------- DRAFT (with robust fallbacks) ----------
-    let draft = await safeDraft({ baseModel, image, palette, scope, component, callOnce });
-    draft = enforceScope(draft, scope);
+    // 1) FACTS (pure JSON; strict schema)
+    const facts = await safeFacts({ model: baseModel, image, scope, component, callOnce });
 
-    let css = draft;
-    const versions = [draft];
-    let lastCritique = "";
+    // 2) CSS from facts (literal, scoped)
+    let css = await safeCssFromFacts({ model: baseModel, image, scope, component, facts, callOnce });
 
-    // ---------- CRITIQUE→FIX ----------
-    for (let i = 1; i <= cycles; i++) {
-      lastCritique = await safeCritique({
-        baseModel, image, css, palette, scope, component, cycle: i, total: cycles, callOnce
-      });
-
-      let fixed = await safeFix({
-        baseModel, image, css, critique: lastCritique, palette, scope, component, cycle: i, total: cycles, callOnce
-      });
-
-      fixed = enforceScope(fixed, scope);
-      css = fixed;
-      versions.push(css);
-    }
-
-    // ---------- POST ----------
-    css = cssOnly(css);
+    // 3) QA / repair
+    css = enforceScope(css, scope);
     css = autofixCss(css);
+
     if (!css.trim()) {
-      return sendError(res, 502, "Model returned no CSS", "Empty completion after retries.");
+      return sendError(res, 502, "Model returned no CSS", "Empty CSS after attempts.");
     }
 
-    if (force_solid) css = flattenGradients(css, solid_color);
-    if (minify) css = minifyCss(css);
-
-    // ---------- HINTS (image OCR for labels/placeholders) ----------
-    const hints = await extractHints({ baseModel, image, css, scope, component, callOnce });
-
-    // ---------- HTML SNIPPET (vision + CSS-coverage) ----------
-    let html = await suggestHtml({ baseModel, image, css, scope, component, hints, callOnce });
+    // 4) HTML snippet that covers all selectors & uses visible text (facts)
+    let html = suggestHtmlFromFacts(css, scope, facts);
     if (!html || !html.trim()) {
-      html = buildHtmlFromCss(css, scope) || ensureScopedHtml(`<div>${fallbackInner(component)}</div>`, scope);
+      html = `<div class="${getScopeClass(scope)}"><button>${escapeHtml(facts?.button_text || "Submit")}</button></div>`;
     }
-    html = ensureScopedHtml(htmlOnly(html), scope);
-    html = ensureHtmlCoversCss(html, css, hints, scope);        // ensure input/button presence
-    html = applyTextHints(html, hints);                         // e.g., button "Subscribe"
-
-    const payload = {
-      draft,
-      css,
-      html,
-      versions,
-      passes: 1 + cycles * 2,
-      palette,
-      notes: lastCritique,
-      scope,
-      component,
-      used_model: baseModel,
-      ...(debug ? { debug: { model_chain: MODEL_CHAIN, vision_supported: supportsVision(baseModel), hints } } : {})
-    };
 
     res.setHeader("Cache-Control", "no-store");
-    return res.status(200).json(payload);
+    return res.status(200).json({
+      css,
+      html,
+      facts,
+      scope,
+      component,
+      used_model: baseModel
+    });
 
   } catch (err) {
     return sendError(res, 500, "Failed to generate CSS.", extractErrMsg(err));
   }
 }
 
-/* ---------------- OpenAI glue ---------------- */
+/* ---------------- OpenAI wrappers ---------------- */
 
-function buildChatParams({ model, messages, kind }) {
+function buildParams(model, kind, messages) {
+  const budget = { facts: 900, css: 1400 };
+  const max = budget[kind] || 900;
   const base = { model, messages };
-  const BUDGET = { draft: 1200, critique: 700, fix: 1400, html: 600, hints: 300 };
-  const max = BUDGET[kind] || 900;
-
   if (isGpt5(model)) {
-    base.max_completion_tokens = max;   // GPT-5 uses this
-    // temperature omitted (some GPT-5 configs accept only default)
+    // GPT-5 uses max_completion_tokens and default temperature
+    base.max_completion_tokens = max;
   } else {
-    base.max_tokens = max;              // 4o / 4o-mini
-    base.temperature = kind === "critique" ? 0.0 : (kind === "draft" ? 0.2 : 0.1);
+    base.max_tokens = max;
+    base.temperature = kind === "facts" ? 0.0 : 0.1;
   }
   return base;
 }
 
 function makeOpenAI(client) {
-  async function tryEachModel(run) {
+  async function tryEach(run) {
     let lastErr;
-    for (const model of (MODEL_CHAIN.length ? MODEL_CHAIN : [DEFAULT_MODEL])) {
-      try { await run(model); return { model }; }
+    for (const m of (MODEL_CHAIN.length ? MODEL_CHAIN : [DEFAULT_MODEL])) {
+      try { await run(m); return m; }
       catch (e) {
         lastErr = e;
-        const msg = String(e?.message || "");
+        const msg = (e && e.message) ? String(e.message) : "";
         const soft = e?.status === 404 || /does not exist|unknown model|restricted/i.test(msg);
-        if (!soft) throw e; // hard error; stop
+        if (!soft) throw e; // hard error
       }
     }
     throw lastErr || new Error("No usable model found");
   }
 
-  const resolveModel = async () => {
-    const { model } = await tryEachModel(async (m) => {
-      // tiny text ping; if this fails, model is unusable
-      await client.chat.completions.create({
-        model: m,
-        messages: [{ role: "user", content: "ping" }],
-        ...(isGpt5(m) ? { max_completion_tokens: 16 } : { max_tokens: 16 })
-      });
+  async function resolveModel() {
+    return await tryEach(async (m) => {
+      await client.chat.completions.create(
+        isGpt5(m)
+          ? { model: m, messages: [{ role:"user", content:"ping" }], max_completion_tokens: 16 }
+          : { model: m, messages: [{ role:"user", content:"ping" }], max_tokens: 16 }
+      );
     });
-    return model;
-  };
+  }
 
-  const callOnce = async (kind, args) => {
-    // If this step uses the image, force a vision-capable model when needed.
-    let modelForThisCall = args.model;
-    const usingImage = !!args.image && !args.no_image;
-    if (usingImage && !supportsVision(modelForThisCall)) {
-      modelForThisCall = "gpt-4o"; // vision fallback
-    }
-
-    const sys = {
-      draft:
-        "You are a front-end CSS engine. Output VALID vanilla CSS only (no HTML/Markdown). " +
-        "You are styling ONE UI COMPONENT (not a full page). " +
-        "All selectors MUST be scoped under the provided SCOPE CLASS. " +
-        "Do NOT target html/body/universal selectors or add resets/normalizers. " +
-        "If gradients are visible, use linear-gradient; if not, prefer a solid background-color. " +
-        "Return CSS ONLY.",
-      critique:
-        "You are a strict component QA assistant. Do NOT output CSS. " +
-        "Compare the screenshot WITH the CURRENT component CSS. " +
-        "Identify concrete mismatches (alignment, spacing, radius, borders, colors, size, typography, shadows/gradients). " +
-        "Ensure selectors remain under the provided scope. Be terse.",
-      fix:
-        "Return CSS only (no HTML/Markdown). Overwrite the stylesheet to resolve the critique " +
-        "and better match the screenshot of the SINGLE COMPONENT. " +
-        "All selectors must remain under the provided scope. No global resets.",
-      html:
-        "Return HTML ONLY (no Markdown, no code fences). Produce a minimal DOM snippet that DEMONSTRATES the styles " +
-        "defined by the provided CSS. The ROOT must be a single element using the provided SCOPE CLASS (e.g., <div class=\".comp\">). " +
-        "Use reasonable placeholder text/values. Prefer semantic elements (button, input, label, a, img) as indicated by selectors. " +
-        "Infer visible button text (e.g., 'Subscribe') and input placeholder from the screenshot when present.",
-      hints:
-        "Return JSON ONLY. Extract UI strings from the screenshot of a SINGLE component: " +
-        "{ \"has_input\": boolean, \"input_type\": \"text|email|search|password|other|unknown\", " +
-        "\"input_placeholder\": string, \"has_button\": boolean, \"button_text\": string }. " +
-        "Keep strings short; if not visible, use empty string. No extra fields."
-    }[kind];
-
-    // Build messages (image + text OR text-only)
-    const baseLines = [
-      `SCOPE CLASS: ${args.scope}`,
-      `COMPONENT TYPE (hint): ${args.component}`
-    ];
-
-    let messages;
-
-    if (kind === "draft") {
-      const usr = [
-        ...baseLines,
-        usingImage
-          ? "Task: study the screenshot region and produce CSS for ONLY that component."
-          : "No screenshot available. Produce reasonable CSS for the component using the hint and palette.",
-        "- Prefix selectors with the scope (or use the scope as root).",
-        "- No page layout or resets.",
-        args.palette?.length ? `Optional palette tokens: ${args.palette.join(", ")}` : "Palette: optional.",
-        "Return CSS ONLY."
-      ].join("\n");
-
-      messages = usingImage
-        ? [
-            { role: "system", content: sys },
-            { role: "user", content: [{ type: "text", text: usr }, { type: "image_url", image_url: { url: args.image, detail: "high" } }] }
-          ]
-        : [
-            { role: "system", content: sys },
-            { role: "user", content: [{ type: "text", text: usr }] }
-          ];
-
-    } else if (kind === "critique") {
-      const usr = [
-        ...baseLines,
-        `Critique ${args.cycle}/${args.total}. List actionable corrections with target selectors where possible.`,
-        "", "CURRENT CSS:", "```css", args.css, "```",
-        args.palette?.length ? `Palette hint: ${args.palette.join(", ")}` : ""
-      ].join("\n");
-
-      messages = usingImage
-        ? [
-            { role: "system", content: sys },
-            { role: "user", content: [{ type: "text", text: usr }, { type: "image_url", image_url: { url: args.image, detail: "high" } }] }
-          ]
-        : [
-            { role: "system", content: sys },
-            { role: "user", content: [{ type: "text", text: usr }] }
-          ];
-
-    } else if (kind === "fix") {
-      const usr = [
-        ...baseLines,
-        `Fix ${args.cycle}/${args.total} for the component.`,
-        "Rules:",
-        "- Keep all selectors under the scope.",
-        "- No body/html/universal selectors.",
-        "- Adjust borders, radius, colors, gradients, typography, and shadows to match the screenshot.",
-        "", "CRITIQUE:", args.critique || "(none)",
-        "", "CURRENT CSS:", "```css", args.css, "```",
-        args.palette?.length ? `Palette hint (optional): ${args.palette.join(", ")}` : ""
-      ].join("\n");
-
-      messages = usingImage
-        ? [
-            { role: "system", content: sys },
-            { role: "user", content: [{ type: "text", text: usr }, { type: "image_url", image_url: { url: args.image, detail: "high" } }] }
-          ]
-        : [
-            { role: "system", content: sys },
-            { role: "user", content: [{ type: "text", text: usr }] }
-          ];
-
-    } else if (kind === "html") {
-      const usr = [
-        ...baseLines,
-        "Generate the minimal HTML snippet that will pick up ALL styles in the CSS. " +
-        "ROOT must be a single element that uses the scope class. " +
-        "Include every element type the CSS targets (e.g., input + button), " +
-        "and prefer using the exact visible text from the screenshot for primary CTAs.",
-        "", "CSS:", "```css", args.css, "```",
-        args.hints ? `\nHINTS JSON: ${JSON.stringify(args.hints)}` : ""
-      ].join("\n");
-
-      messages = [
-        { role: "system", content: sys },
-        { role: "user",
-          content: [
-            { type: "text", text: usr },
-            ...(args.image && !args.no_image ? [{ type: "image_url", image_url: { url: args.image, detail: "high" } }] : [])
-          ]
-        }
-      ];
-
-    } else if (kind === "hints") {
-      const usr = [
-        ...baseLines,
-        "Extract labels from this screenshot.",
-        "Return JSON ONLY as specified. No code fences."
-      ].join("\n");
-
-      messages = [
-        { role: "system", content: sys },
-        { role: "user", content: [{ type: "text", text: usr }, { type: "image_url", image_url: { url: args.image, detail: "high" } }] }
-      ];
-    } else {
-      throw new Error(`Unknown kind: ${kind}`);
-    }
-
-    const params = buildChatParams({ model: modelForThisCall, messages, kind });
+  async function callOnce(kind, { model, messages }) {
+    const params = buildParams(model, kind, messages);
     const r = await client.chat.completions.create(params);
-
-    if (kind === "critique") return textOnly(r?.choices?.[0]?.message?.content || "");
-    if (kind === "html")     return htmlOnly(r?.choices?.[0]?.message?.content || "");
-    if (kind === "hints")    return jsonOnly(r?.choices?.[0]?.message?.content || "{}");
-    // draft/fix
-    return cssOnly(r?.choices?.[0]?.message?.content || (kind === "fix" ? args.css : ""));
-  };
+    return r?.choices?.[0]?.message?.content ?? "";
+  }
 
   return { resolveModel, callOnce };
 }
 
-/* ---------------- Recovery wrappers ---------------- */
+/* ---------------- Passes ---------------- */
 
-async function safeDraft({ baseModel, image, palette, scope, component, callOnce }) {
-  // 1) try with chosen model (auto-vision fallback inside callOnce)
-  let out = await callOnce("draft", { model: baseModel, image, palette, scope, component });
-  if (out && out.trim()) return out;
+async function safeFacts({ model, image, scope, component, callOnce }) {
+  const sys =
+    "You return JSON ONLY. You describe objective, measurable style facts of ONE UI component screenshot. " +
+    "No creativity. If a property is not visible, leave it empty or false. " +
+    "Your JSON must be valid and strictly match the schema keys.";
 
-  // 2) retry once
-  out = await callOnce("draft", { model: baseModel, image, palette, scope, component });
-  if (out && out.trim()) return out;
+  const schema = `
+Return EXACTLY this JSON schema with the keys below (no markdown, no comments):
 
-  // 3) explicit vision fallbacks
-  for (const m of ["gpt-4o", "gpt-4o-mini"]) {
-    try {
-      out = await callOnce("draft", { model: m, image, palette, scope, component });
-      if (out && out.trim()) return out;
-    } catch {}
+{
+  "has_gradient": boolean,
+  "gradient_direction": "to bottom" | "to right" | "to left" | "to top" | "",
+  "gradient_stops": [ { "pos": number, "color": string } ],  // pos 0..1, hex like #RRGGBB
+  "background_color": string,    // hex; empty if gradient present
+  "border_color": string,        // hex
+  "border_width_px": number,
+  "border_radius_px": number,
+  "shadow": { "x_px": number, "y_px": number, "blur_px": number, "spread_px": number, "color": string }, // empty color if none
+  "text_color": string,          // hex
+  "font_size_px": number,
+  "font_weight": number,         // 400, 500, 600, 700…
+  "padding_x_px": number,
+  "padding_y_px": number,
+  "gap_px": number,              // space between inner items if visible; else 0
+  "link_color": string,          // hex if any link text visible, else ""
+  "link_underline": boolean,
+
+  "button_text": string,         // visible CTA like "Subscribe"
+  "input_placeholder": string,   // visible placeholder if an input exists
+  "has_button": boolean,
+  "has_input": boolean,
+  "has_link": boolean,
+  "has_icon": boolean
+}
+`.trim();
+
+  // Prefer a vision-capable model for this step
+  const visionModel = supportsVision(model) ? model : "gpt-4o";
+  const messages = [
+    { role: "system", content: sys },
+    {
+      role: "user",
+      content: [
+        { type: "text", text:
+          [
+            `SCOPE CLASS: ${scope}`,
+            `COMPONENT: ${component}`,
+            "Task: Provide literal, measured facts from the image. Colors MUST be hex (#RRGGBB).",
+            "Gradients ONLY if visually evident. Otherwise background_color.",
+            "Round all px values to nearest integer. Avoid inventing values.",
+            "",
+            schema
+          ].join("\n")
+        },
+        { type: "image_url", image_url: { url: image, detail: "high" } }
+      ]
+    }
+  ];
+
+  // call
+  let raw = await callOnce("facts", { model: visionModel, messages });
+  let obj = tryParseJson(raw);
+  if (!obj || typeof obj !== "object") obj = {};
+
+  // Normalize minimal defaults
+  return normalizeFacts(obj);
+}
+
+async function safeCssFromFacts({ model, image, scope, component, facts, callOnce }) {
+  const sys =
+    "You output VALID vanilla CSS only (no HTML/Markdown). You will rebuild the stylesheet literally from the given FACTS. " +
+    "Do not invent gradients, shadows, fonts, or colors. Use the provided values. " +
+    "All selectors MUST be under the provided SCOPE CLASS only. No resets.";
+
+  const instructions = [
+    `SCOPE CLASS: ${scope}`,
+    `COMPONENT: ${component}`,
+    "Recreate styles literally:",
+    "- If has_gradient is true, use linear-gradient with gradient_direction and gradient_stops.",
+    "- Else use background-color with background_color.",
+    "- Apply border (width, color) and border-radius.",
+    "- Apply box-shadow only if shadow.color is not empty.",
+    "- Use text_color, font_size_px, font_weight, paddings.",
+    "- If link_color present, add a scoped .comp a rule with color and underline if link_underline is true.",
+    "- Use gap if component seems multi-item (icon/text/link).",
+    "Return CSS ONLY."
+  ].join("\n");
+
+  const messages = [
+    { role: "system", content: sys },
+    { role: "user",
+      content: [
+        { type: "text", text: instructions + "\n\nFACTS JSON:\n" + JSON.stringify(facts) },
+        // We include the image as context, but facts should dominate:
+        supportsVision(model) ? { type: "image_url", image_url: { url: image, detail: "high" } } : { type:"text", text:"(image omitted for this model)" }
+      ]
+    }
+  ];
+
+  // Favor base model (5 or 4o). If base is 5 (no temperature control), it's fine.
+  let raw = await callOnce("css", { model, messages });
+  let css = cssOnly(raw);
+  return css;
+}
+
+/* ---------------- HTML from facts ---------------- */
+
+function suggestHtmlFromFacts(css, scope, facts) {
+  const className = getScopeClass(scope);
+  const parts = [];
+
+  if (facts?.has_icon) {
+    parts.push(
+      `<span class="icon" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="8"/></svg></span>`
+    );
   }
 
-  // 4) text-only fallback (no image block)
-  try {
-    out = await callOnce("draft", { model: "gpt-4o-mini", no_image: true, image: null, palette, scope, component });
-    if (out && out.trim()) return out;
-  } catch {}
-
-  return "";
-}
-
-async function safeCritique(args) {
-  try { return await args.callOnce("critique", args); }
-  catch { return ""; }
-}
-
-async function safeFix(args) {
-  try { return await args.callOnce("fix", args); }
-  catch { return args.css || ""; }
-}
-
-/* Extract button label / placeholder via vision */
-async function extractHints({ baseModel, image, css, scope, component, callOnce }) {
-  try {
-    const json = await callOnce("hints", { model: baseModel, image, scope, component });
-    // Validate shape
-    return {
-      has_input: !!json?.has_input,
-      input_type: String(json?.input_type || "").toLowerCase(),
-      input_placeholder: typeof json?.input_placeholder === "string" ? json.input_placeholder : "",
-      has_button: !!json?.has_button,
-      button_text: typeof json?.button_text === "string" ? json.button_text : ""
-    };
-  } catch {
-    return { has_input: false, input_type: "", input_placeholder: "", has_button: false, button_text: "" };
+  // Text/CTA or input/link based on flags
+  if (facts?.has_input) {
+    const ph = facts?.input_placeholder || "Enter text";
+    parts.push(`<input type="text" placeholder="${escapeHtml(ph)}">`);
   }
-}
 
-/* ---------------- Helpers & post-processing ---------------- */
-
-function clampInt(v, min, max) {
-  const n = Number(v);
-  if (Number.isNaN(n)) return min;
-  return Math.max(min, Math.min(max, Math.floor(n)));
-}
-
-function sendError(res, status, error, details, hint) {
-  const payload = { error: String(error || "Unknown") };
-  if (details) payload.details = String(details);
-  if (hint) payload.hint = String(hint);
-  res.status(status).json(payload);
-}
-function extractErrMsg(err) {
-  if (err?.response?.data) {
-    try { return JSON.stringify(err.response.data); } catch {}
-    return String(err.response.data);
+  if (facts?.has_button) {
+    const label = facts?.button_text || "Submit";
+    parts.push(`<button>${escapeHtml(label)}</button>`);
   }
-  if (err?.message) return err.message;
-  return String(err);
+
+  if (facts?.has_link) {
+    parts.push(`<a href="#">${escapeHtml(facts.button_text || "Previous period")}</a>`);
+  }
+
+  if (!parts.length) {
+    // fallback to generic pill with dropdown arrow if nothing detected
+    parts.push(`<span class="text">${escapeHtml(facts?.button_text || "Label")}</span>`);
+    parts.push(`<span class="dropdown" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 24 24" fill="none"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>`);
+  }
+
+  return `<div class="${className}" role="button" tabindex="0">\n  ${parts.join("\n  ")}\n</div>`;
 }
 
-function cssOnly(text = "") {
+/* ---------------- Utilities ---------------- */
+
+function tryParseJson(s) {
+  try { return JSON.parse(s); } catch {}
+  const m = String(s || "").match(/\{[\s\S]*\}$/);
+  if (m) { try { return JSON.parse(m[0]); } catch {} }
+  return null;
+}
+
+function normalizeFacts(f) {
+  const n = (v, d=0)=> (Number.isFinite(+v) ? Math.round(+v) : d);
+  const hex = (c)=> typeof c === "string" ? c.trim() : "";
+  const b = (v)=> !!v;
+
+  const out = {
+    has_gradient: !!f.has_gradient,
+    gradient_direction: typeof f.gradient_direction === "string" ? f.gradient_direction : "",
+    gradient_stops: Array.isArray(f.gradient_stops) ? f.gradient_stops.map(s => ({
+      pos: Number.isFinite(+s.pos) ? Math.max(0, Math.min(1, +s.pos)) : 0,
+      color: hex(s.color)
+    })) : [],
+    background_color: hex(f.background_color),
+    border_color: hex(f.border_color),
+    border_width_px: n(f.border_width_px, 1),
+    border_radius_px: n(f.border_radius_px, 8),
+    shadow: {
+      x_px: n(f?.shadow?.x_px, 0),
+      y_px: n(f?.shadow?.y_px, 0),
+      blur_px: n(f?.shadow?.blur_px, 0),
+      spread_px: n(f?.shadow?.spread_px, 0),
+      color: hex(f?.shadow?.color || "")
+    },
+    text_color: hex(f.text_color || "#000000"),
+    font_size_px: n(f.font_size_px, 14),
+    font_weight: n(f.font_weight, 600),
+    padding_x_px: n(f.padding_x_px, 12),
+    padding_y_px: n(f.padding_y_px, 6),
+    gap_px: n(f.gap_px, 8),
+    link_color: hex(f.link_color || ""),
+    link_underline: b(f.link_underline),
+    button_text: typeof f.button_text === "string" ? f.button_text : "",
+    input_placeholder: typeof f.input_placeholder === "string" ? f.input_placeholder : "",
+    has_button: b(f.has_button),
+    has_input: b(f.has_input),
+    has_link: b(f.has_link),
+    has_icon: b(f.has_icon)
+  };
+
+  // If gradient is false or stops missing, ensure background_color is used
+  if (!out.has_gradient || !out.gradient_stops.length) {
+    out.has_gradient = false;
+    out.gradient_direction = "";
+    out.gradient_stops = [];
+  }
+
+  return out;
+}
+
+function cssOnly(text="") {
   return String(text).replace(/^```(?:css)?\s*/i, "").replace(/```$/i, "").trim();
 }
-function textOnly(s = "") {
-  return String(s).replace(/```[\s\S]*?```/g, "").trim();
-}
-function htmlOnly(s = "") {
-  return String(s)
-    .replace(/^```(?:html)?\s*/i, "")
-    .replace(/```$/i, "")
-    .trim();
-}
-function jsonOnly(s = "") {
-  const raw = String(s || "");
-  try { return JSON.parse(raw); } catch {}
-  const m = raw.match(/\{[\s\S]*\}/);
-  if (m) { try { return JSON.parse(m[0]); } catch {} }
-  return {};
-}
-
-/** Prefix non-@, non-:root top-level selectors with scope */
 function enforceScope(inputCss = "", scope = ".comp") {
   let css = cssOnly(inputCss);
   css = css.replace(/(^|})\s*([^@}{]+?)\s*\{/g, (m, p1, selectors) => {
@@ -449,130 +371,31 @@ function enforceScope(inputCss = "", scope = ".comp") {
   });
   return css.trim();
 }
-
-/** Heuristic CSS repair */
 function autofixCss(css = "") {
   let out = cssOnly(css);
-  out = out.replace(/\/\*+\s*START_CSS\s*\*+\//gi, "");  // strip markers
-  out = out.replace(/,\s*(;|\})/g, "$1");                // fix dangling commas
-  // remove zero-alpha shadow layers
-  out = out.replace(/(box-shadow\s*:\s*)([^;]+);/gi, (m, p, val) => {
-    const cleaned = val.split(/\s*,\s*/).filter(layer => !/rgba?\([^)]*,\s*0(?:\.0+)?\)/i.test(layer)).join(", ");
-    return `${p}${cleaned};`;
-  });
-  out = out.replace(/([^;\{\}\s])\s*\}/g, "$1; }");      // ensure semicolons
+  out = out.replace(/,\s*(;|\})/g, "$1");        // trailing commas
+  out = out.replace(/([^;\{\}\s])\s*\}/g, "$1; }");
   const open = (out.match(/\{/g) || []).length;
   const close = (out.match(/\}/g) || []).length;
-  if (open > close) out += "}".repeat(open - close);     // balance braces
+  if (open > close) out += "}".repeat(open - close);
   return out.trim();
 }
 
-function flattenGradients(css = "", solid = "") {
-  const color = solid && /^#|rgb|hsl|var\(/i.test(solid) ? solid : null;
-  let out = css.replace(/background-image\s*:\s*linear-gradient\([^;]+;/gi, m => color ? `background-color: ${color};` : m);
-  out = out.replace(/background\s*:\s*linear-gradient\([^;]+;/gi, m => color ? `background-color: ${color};` : m);
-  return out;
-}
-
-function minifyCss(css = "") {
-  return css
-    .replace(/\s*\/\*[\s\S]*?\*\/\s*/g, "")
-    .replace(/\s*([\{\}:;,])\s*/g, "$1")
-    .replace(/;}/g, "}")
-    .trim();
-}
-
-/* Build a reasonable HTML snippet from selectors */
-function buildHtmlFromCss(css, scope) {
-  const className = getScopeClass(scope);
-  const need = {
-    inputGeneric: /(^|[^\w-])input(\b|[\s\[#.:>{,])/i.test(css),
-    inputText: /\binput\[type\s*=\s*["']?text["']?\]/i.test(css),
-    inputEmail: /\binput\[type\s*=\s*["']?email["']?\]/i.test(css),
-    inputSearch: /\binput\[type\s*=\s*["']?search["']?\]/i.test(css),
-    textarea: /\btextarea\b/i.test(css),
-    select: /\bselect\b/i.test(css),
-    button: /\bbutton\b/i.test(css),
-    a: /\ba\b/i.test(css),
-    label: /\blabel\b/i.test(css),
-    img: /\bimg\b/i.test(css)
-  };
-
-  const parts = [];
-  if (need.label) parts.push(`<label for="field">Label</label>`);
-  if (need.inputText || need.inputGeneric) parts.push(`<input id="field" type="text" placeholder="Enter text">`);
-  if (need.inputEmail) parts.push(`<input type="email" placeholder="name@example.com">`);
-  if (need.inputSearch) parts.push(`<input type="search" placeholder="Search">`);
-  if (need.textarea) parts.push(`<textarea rows="3" placeholder="Type here"></textarea>`);
-  if (need.select) parts.push(`<select><option>One</option><option>Two</option></select>`);
-  if (need.img) parts.push(`<img alt="preview" src="https://dummyimage.com/80x48/ddd/999.png&text=img">`);
-  if (need.a) parts.push(`<a href="#">Link</a>`);
-  if (need.button) parts.push(`<button>Submit</button>`);
-  if (!parts.length) parts.push(`Button`);
-
-  return `<div class="${className}">\n  ${parts.join("\n  ")}\n</div>`;
-}
-
-/* Ask model for an HTML snippet, with image & hints */
-async function suggestHtml({ baseModel, image, css, scope, component, hints, callOnce }) {
-  try {
-    const html = await callOnce("html", { model: baseModel, image, css, scope, component, hints });
-    return htmlOnly(html);
-  } catch {
-    return "";
-  }
-}
-
-function ensureScopedHtml(html, scope) {
-  const className = getScopeClass(scope);
-  const rootRe = new RegExp(`<([a-z0-9-]+)([^>]*class=["'][^"']*${escapeReg(className)}[^"']*["'][^>]*)>`, "i");
-  if (rootRe.test(html)) return html.trim();
-  // wrap
-  return `<div class="${className}">\n${html.trim()}\n</div>`;
-}
-
-/* If CSS references inputs/buttons but HTML lacks them, inject reasonable defaults */
-function ensureHtmlCoversCss(html, css, hints, scope) {
-  let out = html.trim();
-  const hasInputCSS = /(^|[^\w-])input(\b|[\s\[#.:>{,])/i.test(css);
-  const hasButtonCSS = /\bbutton\b/i.test(css);
-  const hasInputHTML = /<input\b/i.test(out);
-  const hasButtonHTML = /<button\b/i.test(out);
-
-  if (hasInputCSS && !hasInputHTML) {
-    out = out.replace(/(<\/[a-z0-9-]+>\s*)$/i, `  <input type="text" placeholder="${escapeHtml(hints?.input_placeholder || 'Enter text')}">\n$1`);
-  }
-  if (hasButtonCSS && !hasButtonHTML) {
-    out = out.replace(/(<\/[a-z0-9-]+>\s*)$/i, `  <button>${escapeHtml(hints?.button_text || 'Submit')}</button>\n$1`);
-  }
-  return out;
-}
-
-/* Replace generic button/placeholder text with vision-derived strings */
-function applyTextHints(html, hints) {
-  if (!hints) return html;
-  let out = html;
-
-  if (hints.button_text) {
-    out = out.replace(/(<button[^>]*>)([\s\S]*?)(<\/button>)/i, (_, a, _txt, c) => `${a}${escapeHtml(hints.button_text)}${c}`);
-  }
-  if (hints.input_placeholder) {
-    out = out.replace(/(<input\b[^>]*)(placeholder=["'][^"']*["'])?/i, (m, head, ph) => {
-      if (/placeholder=/i.test(m)) {
-        return m.replace(/placeholder=["'][^"']*["']/i, `placeholder="${escapeHtml(hints.input_placeholder)}"`);
-      }
-      return `${head} placeholder="${escapeHtml(hints.input_placeholder)}"`;
-    });
-  }
-  return out;
-}
-
 function getScopeClass(scope = ".comp") { return String(scope || ".comp").trim().replace(/^\./, ""); }
-function escapeReg(s){ return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
 function escapeHtml(s=""){ return String(s).replace(/[&<>"']/g, m=>({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[m])); }
-function fallbackInner(componentHint = "component") {
-  if (/input|field/i.test(componentHint)) return `<input type="text" placeholder="Enter text">`;
-  if (/link|anchor/i.test(componentHint)) return `<a href="#">Link</a>`;
-  if (/card/i.test(componentHint)) return `<div class="item"><h4>Title</h4><p>Body</p><button>Action</button></div>`;
-  return `<button>Submit</button>`;
+
+/* ---------------- Error helpers ---------------- */
+
+function sendError(res, status, error, details) {
+  const payload = { error: String(error || "Unknown") };
+  if (details) payload.details = String(details);
+  res.status(status).json(payload);
+}
+function extractErrMsg(err) {
+  if (err?.response?.data) {
+    try { return JSON.stringify(err.response.data); } catch {}
+    return String(err.response.data);
+  }
+  if (err?.message) return err.message;
+  return String(err);
 }
