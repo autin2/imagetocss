@@ -1,316 +1,417 @@
+<!-- app.html -->
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="is-app">
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>Image → CSS</title>
   <link rel="stylesheet" href="style.css"/>
+
+  <style>
+    /* App-only polish layered on top of style.css */
+
+    .wrap { max-width: var(--maxw); margin: 18px auto; padding: 0 20px; }
+
+    .panel { background: var(--paper); border:1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
+    .panel.head { padding: 14px 16px; font-weight: 800; border-bottom: 1px solid var(--border); }
+    .panel.body { padding: 14px 16px; }
+
+    /* Upload/select image box — stable height, image inside */
+    .select-box{
+      position: relative;
+      border: 2px dashed var(--border);
+      border-radius: 12px;
+      min-height: 360px;              /* keep panel height stable */
+      display: grid; place-items: center;
+      background: #fff; overflow: hidden;
+      cursor: pointer;
+    }
+    .select-inner { text-align:center; color:var(--muted); max-width:90%; }
+    .select-inner .btn-row{ display:flex; gap:10px; justify-content:center; margin-top:10px; }
+    .select-inner .hint{ margin-top:6px; font-size:13px; color:var(--muted); }
+
+    .select-box.has-image{ border-style: solid; }
+    .select-box img.preview{
+      max-width:100%; max-height:100%;
+      display:block; object-fit:contain;
+    }
+
+    /* Hover overlay appears only when an image exists */
+    .change-overlay{
+      position:absolute; inset:0;
+      display:grid; place-items:center;
+      background: rgba(2,6,23,0);
+      transition: background .18s ease, opacity .18s ease;
+      opacity:0; pointer-events:none;
+    }
+    .select-box.has-image:hover .change-overlay{
+      background: rgba(2,6,23,.35);
+      opacity:1; pointer-events:auto;
+    }
+    .change-overlay .btn{
+      background:#fff; color:var(--ink); border-color:transparent; font-weight:800;
+    }
+
+    /* Controls row */
+    .controls{ display:grid; grid-template-columns: 1fr 1fr 1fr; gap:10px; margin-top:12px; }
+    @media (max-width: 900px){ .controls{ grid-template-columns: 1fr 1fr; } }
+    @media (max-width: 640px){ .controls{ grid-template-columns: 1fr; } }
+
+    .ctrl{ display:flex; flex-direction:column; gap:6px; }
+    .ctrl label{ font-size:12px; color:var(--muted); font-weight:700; }
+    .ctrl input, .ctrl select{
+      padding:10px 12px; border:1px solid var(--border); border-radius:10px; background:#fff; outline:none;
+    }
+    .ctrl input:focus, .ctrl select:focus{
+      box-shadow:0 0 0 3px rgba(14,165,233,.18); border-color:#bae6fd;
+    }
+
+    .flat-row{ display:flex; align-items:center; gap:10px; margin-top:8px; }
+    .flat-row label{ font-size:13px; color:var(--muted); }
+
+    /* Action buttons */
+    .actions{ display:flex; gap:10px; margin-top:12px; flex-wrap:wrap; }
+    .actions .btn.primary{ background:var(--ink); color:#fff; border-color:transparent; }
+    .actions .btn:disabled{ opacity:.6; cursor:not-allowed; }
+
+    /* Right side panels: fixed heights to avoid growth reflow */
+    .code#output{ height: 280px; }
+    #apiRaw.code{ height: 200px; }
+
+    .copy-row{ display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:8px; }
+    .copy-row .label{ color:var(--muted); font-size:13px; }
+    .copy{ appearance:none; border:1px solid var(--border); background:#fff; color:var(--ink);
+           padding:8px 10px; border-radius:10px; font-weight:700; cursor:pointer; }
+
+    /* Status pill */
+    .status-pill{ font-size:12px; padding:4px 8px; border-radius:999px; font-weight:800; }
+    .ok{ background:#e6fffa; color:#065f46; border:1px solid #99f6e4; }
+    .bad{ background:#fef2f2; color:#7f1d1d; border:1px solid #fecaca; }
+
+    /* Loading scrim */
+    .scrim{ position:fixed; inset:0; display:none; place-items:center; background:rgba(15,23,42,.35); z-index:2000; }
+    .scrim.show{ display:grid; }
+    .spinner{ width:42px; height:42px; border-radius:999px; border:3px solid rgba(255,255,255,.35); border-top-color:#fff; animation:spin .8s linear infinite; }
+    @keyframes spin{ to{ transform:rotate(360deg); } }
+
+    /* Prevent accidental text selection on buttons */
+    .btn, .copy{ user-select:none; }
+  </style>
 </head>
 <body class="is-app">
-  <div class="container" style="padding-top:24px;padding-bottom:24px">
-    <h1>Image → CSS</h1>
-    <p class="lead">Upload/paste a <b>cropped screenshot of one component</b> (button, card, input). We’ll generate scoped CSS with GPT-5.</p>
+  <header class="header">
+    <div class="container nav">
+      <a class="brand" href="./">
+        <div class="brand-mark"></div><b>Image → CSS</b>
+      </a>
+      <nav class="links">
+        <a href="./">Home</a>
+        <a href="#" aria-disabled="true">Docs</a>
+      </nav>
+    </div>
+  </header>
 
-    <div class="app-grid">
-      <!-- LEFT: fixed-height panel -->
-      <section class="card app-panel pad">
-        <div class="snip-frame drop" id="drop" tabindex="0" aria-label="Drop or choose an image">
-          <!-- Empty state -->
-          <div class="drop-inner" id="emptyUi">
-            <div>
-              <div><b>Drop an image</b>, click <em>Choose</em>, or paste (Ctrl/Cmd+V).</div>
-              <div class="btn-row" style="margin-top:8px">
-                <button id="chooseBtn" class="btn small">Choose</button>
-                <button id="pasteBtn" class="btn small">Paste</button>
+  <main class="wrap">
+    <div class="grid-2">
+      <!-- LEFT: image + controls -->
+      <section class="panel">
+        <div class="panel head">Upload / Paste a Component Screenshot</div>
+        <div class="panel body">
+          <div id="selectBox" class="select-box" tabindex="0">
+            <div id="selectInner" class="select-inner">
+              <h3 style="margin:0 0 6px;">Drop an image, click <b>Choose</b>, or paste (Ctrl/Cmd+V).</h3>
+              <div class="btn-row">
+                <button id="chooseBtn" class="btn">Choose</button>
+                <button id="pasteBtn" class="btn">Paste</button>
               </div>
-              <div class="hint" id="sizeHint">No image selected</div>
+              <div class="hint">Upload a tightly cropped screenshot of one component (button, card, input).</div>
+            </div>
+            <div class="change-overlay" id="changeOverlay" aria-hidden="true">
+              <button id="changeBtn" class="btn">Change photo</button>
+            </div>
+            <input id="fileInput" type="file" accept="image/*" hidden />
+          </div>
+
+          <div class="controls">
+            <div class="ctrl">
+              <label for="scope">Scope class</label>
+              <input id="scope" type="text" value=".comp" spellcheck="false" />
+            </div>
+            <div class="ctrl">
+              <label for="component">Component hint</label>
+              <input id="component" type="text" value="button" placeholder="button, card, input…" />
+            </div>
+            <div class="ctrl">
+              <label for="checks">Checks (1–4)</label>
+              <input id="checks" type="number" min="1" max="4" value="1" />
             </div>
           </div>
 
-          <!-- Image lives inside the frame -->
-          <img id="preview" class="preview-img" alt="Selected image preview"/>
-
-          <!-- Hover overlay (only when image selected) -->
-          <div class="overlay" id="overlay">
-            <button id="changeBtn" class="btn accent">Change photo</button>
+          <div class="flat-row">
+            <label><input id="flatToggle" type="checkbox" /> Treat as flat (no gradients)</label>
+            <label>Color: <input id="flatColor" type="text" placeholder="#3b82f6 (optional)" style="width:140px"/></label>
           </div>
 
-          <!-- hidden input -->
-          <input id="file" type="file" accept="image/*" hidden>
-        </div>
-
-        <!-- Inputs (palette removed) -->
-        <div class="grid-2" style="gap:12px; margin-top:14px">
-          <div>
-            <div class="lead" style="font-size:13px;margin:0 0 6px;color:var(--muted);font-weight:700">Scope class</div>
-            <input id="scope" type="text" class="input" value=".comp" placeholder=".comp" style="width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--border)"/>
+          <div class="actions">
+            <button id="goBtn" class="btn primary">Generate CSS</button>
+            <button id="clearBtn" class="btn">Clear</button>
+            <span id="apiPill" class="status-pill" style="display:none"></span>
           </div>
-          <div>
-            <div class="lead" style="font-size:13px;margin:0 0 6px;color:var(--muted);font-weight:700">Component hint</div>
-            <input id="component" type="text" class="input" value="button" placeholder="button, card, input, …" style="width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--border)"/>
-          </div>
-        </div>
-
-        <!-- Controls row (one line, aligned) -->
-        <div class="controls" style="margin-top:12px">
-          <button id="runBtn" class="btn primary">Generate CSS</button>
-          <button id="clearBtn" class="btn">Clear</button>
-          <span id="statusLead" class="lead spacer" style="font-size:13px;color:var(--muted)"></span>
-          <span class="api-pill">API: <b id="apiStatus">—</b></span>
         </div>
       </section>
 
-      <!-- RIGHT: fixed-height panel with internal scrolling -->
-      <section class="card app-panel pad">
-        <div class="outputbar">
-          <span class="label">Final CSS</span>
-          <button id="copyFinalBtn" class="btn small">Copy</button>
-        </div>
-        <pre id="output" class="code" aria-label="Final CSS"></pre>
+      <!-- RIGHT: outputs -->
+      <section class="panel">
+        <div class="panel head">Results</div>
+        <div class="panel body">
+          <div class="copy-row">
+            <div class="label">Final CSS</div>
+            <button id="copyBtn" class="copy">Copy</button>
+          </div>
+          <pre id="output" class="code">/* Your CSS will appear here */</pre>
 
-        <div class="outputbar" style="margin-top:8px">
-          <span class="label">API response / errors</span>
+          <div class="copy-row" style="margin-top:14px;">
+            <div class="label">API response / raw preview</div>
+          </div>
+          <div style="display:flex; align-items:center; gap:10px; margin-bottom:6px;">
+            <div id="apiLine" class="label">API: –</div>
+          </div>
+          <div class="label" style="margin:6px 0 4px;">Model raw_out (first 2k):</div>
+          <pre id="apiRaw" class="code">(none yet)</pre>
         </div>
-        <pre id="errors" class="code" aria-label="Errors"></pre>
       </section>
     </div>
-  </div>
+  </main>
 
-  <!-- Global loading overlay -->
-  <div id="loading" class="loading-scrim" aria-hidden="true">
-    <div class="loading-card" role="status" aria-live="polite" aria-atomic="true">
-      <span class="spinner" aria-hidden="true"></span>
-      <div>
-        <div class="loading-title">Generating CSS…</div>
-        <div class="loading-sub">This usually takes a few seconds.</div>
-      </div>
-    </div>
-  </div>
+  <div id="scrim" class="scrim" aria-hidden="true"><div class="spinner"></div></div>
 
   <script>
-    // ----- Elements -----
-    const fileEl = document.getElementById('file');
-    const dropEl = document.getElementById('drop');
+    // Elements
+    const selectBox = document.getElementById('selectBox');
+    const selectInner = document.getElementById('selectInner');
+    const changeOverlay = document.getElementById('changeOverlay');
     const chooseBtn = document.getElementById('chooseBtn');
     const pasteBtn = document.getElementById('pasteBtn');
     const changeBtn = document.getElementById('changeBtn');
-    const sizeHint = document.getElementById('sizeHint');
-    const preview = document.getElementById('preview');
+    const fileInput = document.getElementById('fileInput');
 
     const scopeEl = document.getElementById('scope');
-    const componentEl = document.getElementById('component');
+    const compEl = document.getElementById('component');
+    const checksEl = document.getElementById('checks');
+    const flatToggleEl = document.getElementById('flatToggle');
+    const flatColorEl = document.getElementById('flatColor');
 
-    const runBtn = document.getElementById('runBtn');
+    const goBtn = document.getElementById('goBtn');
     const clearBtn = document.getElementById('clearBtn');
-    const statusLead = document.getElementById('statusLead');
-    const apiStatus = document.getElementById('apiStatus');
 
     const outputEl = document.getElementById('output');
-    const errorsEl = document.getElementById('errors');
-    const copyFinalBtn = document.getElementById('copyFinalBtn');
+    const copyBtn = document.getElementById('copyBtn');
+    const apiLine = document.getElementById('apiLine');
+    const apiPill = document.getElementById('apiPill');
+    const apiRaw = document.getElementById('apiRaw');
 
-    const loading = document.getElementById('loading');
+    const scrim = document.getElementById('scrim');
 
+    // State
     let dataUrl = "";
+    let previewImg = null;
 
-    // ----- Loading overlay -----
-    function setLoading(on){
-      loading.classList.toggle('open', !!on);
-      loading.setAttribute('aria-hidden', on ? 'false' : 'true');
+    // Helpers
+    function showScrim(on){ scrim.classList.toggle('show', !!on); }
+    function setStatus(ok, text){
+      apiPill.style.display = 'inline-block';
+      apiPill.textContent = text || (ok ? 'OK' : 'Error');
+      apiPill.className = 'status-pill ' + (ok ? 'ok' : 'bad');
     }
-
-    // ----- DnD / Choose / Paste -----
-    chooseBtn.addEventListener('click', () => fileEl.click());
-    changeBtn.addEventListener('click', () => fileEl.click());
-
-    dropEl.addEventListener('click', (e) => {
-      if (!dropEl.classList.contains('has-image') && e.target === dropEl) fileEl.click();
-    });
-
-    fileEl.addEventListener('change', (e) => { const f = e.target.files?.[0]; if (f) readFile(f); });
-
-    dropEl.addEventListener('dragover', (e)=>{ e.preventDefault(); dropEl.classList.add('drag'); });
-    dropEl.addEventListener('dragleave', ()=> dropEl.classList.remove('drag'));
-    dropEl.addEventListener('drop', (e)=>{
-      e.preventDefault(); dropEl.classList.remove('drag');
-      const f = e.dataTransfer.files?.[0]; if (f) readFile(f);
-    });
-
-    pasteBtn.addEventListener('click', () => {
-      navigator.clipboard.read?.().then(async items => {
-        for (const item of items) for (const t of item.types) {
-          if (t.startsWith('image/')) { const blob = await item.getType(t); readFile(blob); return; }
-        }
-        flash("No image on clipboard");
-      }).catch(()=> flash("Clipboard read not allowed"));
-    });
-    window.addEventListener('paste', (e) => {
-      const it = [...(e.clipboardData?.items || [])].find(i => i.type.startsWith('image/'));
-      if (it) readFile(it.getAsFile());
-    });
-
-    dropEl.addEventListener('keydown', (e)=>{
-      if (!dropEl.classList.contains('has-image') && (e.key === 'Enter' || e.key === ' ')) {
-        e.preventDefault(); fileEl.click();
-      }
-    });
-
-    function readFile(file){
-      const r = new FileReader();
-      r.onload = () => {
-        dataUrl = r.result;
-        preview.src = dataUrl;
-        dropEl.classList.add('has-image');
-        sizeHint.textContent = formatBytes(file.size || new Blob([dataUrl]).size);
-        statusLead.textContent = "Image ready";
-      };
-      r.readAsDataURL(file);
+    function resetStatus(){
+      apiPill.style.display = 'none';
+      apiLine.textContent = 'API: –';
+      apiRaw.textContent = '(none yet)';
     }
-
-    function clearImage(){
-      dataUrl = "";
-      preview.src = "";
-      dropEl.classList.remove('has-image');
-      sizeHint.textContent = "No image selected";
-    }
-
-    function formatBytes(n){ if (!n && n!==0) return "0 KB"; const u=['B','KB','MB','GB']; let i=0; while(n>=1024 && i<u.length-1){n/=1024;i++} return `${n.toFixed(i?1:0)} ${u[i]}`; }
-    function flash(msg){ sizeHint.textContent = msg; setTimeout(()=> sizeHint.textContent = sizeHint.textContent || msg, 1400); }
-
-    // ----- Quick flatness detection (top vs bottom) -----
-    async function isFlatImage(imgEl, threshold = 12) {
-      const cnv = document.createElement('canvas');
-      const ctx = cnv.getContext('2d', { willReadFrequently: true });
-      cnv.width = imgEl.naturalWidth; cnv.height = imgEl.naturalHeight;
-      ctx.drawImage(imgEl, 0, 0);
-      const h = cnv.height, w = cnv.width;
-      const x0 = Math.floor(w * 0.25), x1 = Math.floor(w * 0.75);
-
-      function avgRowRange(y0, y1) {
-        const hgt = Math.max(1, y1 - y0);
-        const img = ctx.getImageData(x0, y0, x1 - x0, hgt).data;
-        let r=0,g=0,b=0,count=0;
-        for (let i=0;i<img.length;i+=4){ r+=img[i]; g+=img[i+1]; b+=img[i+2]; count++; }
-        return [r/count, g/count, b/count];
-      }
-      const top = avgRowRange(0, Math.floor(h*0.25));
-      const bot = avgRowRange(Math.floor(h*0.75), h);
-      const dist = Math.hypot(top[0]-bot[0], top[1]-bot[1], top[2]-bot[2]);
-      return { flat: dist < threshold, top, bot };
-    }
-
-    function rgbToHex([r,g,b]){
-      const to = (n)=>Math.max(0,Math.min(255,Math.round(n))).toString(16).padStart(2,"0");
-      return `#${to(r)}${to(g)}${to(b)}`;
-    }
-    function meanRGB(a,b){ return [(a[0]+b[0])/2,(a[1]+b[1])/2,(a[2]+b[2])/2]; }
-
-    function solidifyCss(css, hexColor) {
-      const solid = `background-color: ${hexColor};`;
-      return css
-        .replace(/background\s*:\s*[^;]*gradient\([^;]*\)\s*;?/gi, solid)
-        .replace(/background-image\s*:\s*[^;]*gradient\([^;]*\)\s*;?/gi, "background-image: none;")
-        .replace(/::after\s*\{[^}]*\}/gi, (block) => {
-          if (/background[^;]*gradient/i.test(block) || /rgba\([^)]*,\s*[^)]*,\s*[^)]*,\s*0(\.\d+)?\)/i.test(block)) {
-            return "";
-          }
-          return block;
-        });
-    }
-
-    // ----- API helper (safe text → JSON) -----
-    async function generateCSS({ image, scope = ".comp", component = "button", force_solid = false, solid_color = "" }) {
-      const r = await fetch("/api/generate-css", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image, palette: [], scope, component, force_solid, solid_color }),
+    function toDataUrl(file){
+      return new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => resolve(r.result);
+        r.onerror = reject;
+        r.readAsDataURL(file);
       });
+    }
+    function setImage(src){
+      dataUrl = src || "";
+      // remove previous preview
+      if (previewImg && previewImg.parentNode) previewImg.parentNode.removeChild(previewImg);
+      previewImg = null;
 
-      const text = await r.text();
-      let json = null;
-      try { json = JSON.parse(text); } catch {}
-
-      if (!r.ok) {
-        const err = new Error((json && (json.error || json.message)) || text || `HTTP ${r.status}`);
-        err.status = r.status;
-        err.payload = json ?? text;
-        throw err;
+      if (dataUrl){
+        previewImg = document.createElement('img');
+        previewImg.className = 'preview';
+        previewImg.alt = 'Preview';
+        previewImg.src = dataUrl;
+        selectBox.appendChild(previewImg);
+        selectBox.classList.add('has-image');
+        changeOverlay.setAttribute('aria-hidden', 'false');
+        selectInner.style.display = 'none';
+      } else {
+        selectBox.classList.remove('has-image');
+        changeOverlay.setAttribute('aria-hidden', 'true');
+        selectInner.style.display = '';
       }
-      return json ?? { error: "Malformed JSON from server", raw: text };
     }
 
-    function fmt(x) { if (typeof x === "string") return x; try { return JSON.stringify(x, null, 2); } catch { return String(x); } }
-
-    // ----- Actions -----
-    runBtn.addEventListener('click', onRun);
-    clearBtn.addEventListener('click', () => { clearOutputs(); clearImage(); });
-    copyFinalBtn.addEventListener('click', async ()=> {
-      if (!outputEl.textContent) return;
-      try { await navigator.clipboard.writeText(outputEl.textContent); copyFlash(copyFinalBtn); } catch {}
+    // File choose
+    chooseBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      fileInput.click();
+    });
+    changeBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      fileInput.click();
+    });
+    // If image present, clicking the box also opens chooser
+    selectBox.addEventListener('click', (e) => {
+      if (selectBox.classList.contains('has-image') && !e.target.closest('.change-overlay')){
+        fileInput.click();
+      }
     });
 
-    async function onRun(){
-      clearOutputs();
-      if (!dataUrl || !dataUrl.startsWith('data:image')) {
-        errorsEl.textContent = "Pick or paste an image first (cropped to a single component).";
-        apiStatus.textContent = "400"; apiStatus.style.color = "#ef4444"; return;
+    fileInput.addEventListener('change', async (e) => {
+      const f = e.target.files && e.target.files[0];
+      if (!f) return;
+      const du = await toDataUrl(f);
+      setImage(du);
+      resetStatus();
+    });
+
+    // Drag & drop
+    ;['dragenter','dragover','dragleave','drop'].forEach(ev => {
+      selectBox.addEventListener(ev, (e) => { e.preventDefault(); e.stopPropagation(); }, false);
+    });
+    selectBox.addEventListener('drop', async (e) => {
+      const f = e.dataTransfer.files && e.dataTransfer.files[0];
+      if (!f) return;
+      const du = await toDataUrl(f);
+      setImage(du);
+      resetStatus();
+    });
+
+    // Paste button and global paste
+    pasteBtn.addEventListener('click', async (e) => {
+      e.preventDefault();
+      try {
+        if (navigator.clipboard && navigator.clipboard.read){
+          const items = await navigator.clipboard.read();
+          for (const it of items){
+            for (const type of it.types){
+              if (type.startsWith('image/')){
+                const blob = await it.getType(type);
+                const du = await toDataUrl(blob);
+                setImage(du);
+                resetStatus();
+                return;
+              }
+            }
+          }
+        }
+        alert('No image in clipboard or your browser blocked clipboard read.');
+      } catch {
+        alert('Clipboard read failed. Try ⌘/Ctrl+V directly.');
       }
+    });
+    window.addEventListener('paste', async (e) => {
+      const items = e.clipboardData && e.clipboardData.items;
+      if (!items) return;
+      for (const it of items){
+        if (it.type && it.type.startsWith('image/')){
+          const blob = it.getAsFile();
+          const du = await toDataUrl(blob);
+          setImage(du);
+          resetStatus();
+          break;
+        }
+      }
+    });
+
+    // Generate
+    goBtn.addEventListener('click', async () => {
+      if (!dataUrl){ alert('Please select an image first.'); return; }
+
+      // build payload
+      const payload = {
+        image: dataUrl,
+        scope: scopeEl.value || ".comp",
+        component: compEl.value || "component",
+        double_checks: Math.max(1, Math.min(4, Number(checksEl.value || 1))),
+        force_solid: !!flatToggleEl.checked,
+        solid_color: (flatColorEl.value || "").trim(),
+        minify: false,
+        debug: true
+      };
+
+      showScrim(true);
+      goBtn.disabled = true;
+      setStatus(true, 'Working…');
+      apiLine.textContent = 'API: (requesting…)';
+      apiRaw.textContent = '(awaiting model output)';
 
       try {
-        runBtn.disabled = true;
-        setLoading(true);
-        statusLead.textContent = "Analyzing…";
-        apiStatus.textContent = "…"; apiStatus.style.color = "";
-
-        // Flatness check + color
-        const { flat, top, bot } = await isFlatImage(preview, 12);
-        const avgHex = rgbToHex(meanRGB(top, bot));
-
-        statusLead.textContent = flat ? "Flat background detected" : "Gradient-like variation detected";
-        const res = await generateCSS({
-          image: dataUrl,
-          scope: scopeEl.value || ".comp",
-          component: componentEl.value || "component",
-          force_solid: flat,
-          solid_color: avgHex
+        const resp = await fetch('/api/generate-css', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
         });
 
-        apiStatus.textContent = "200 OK"; apiStatus.style.color = "#16a34a";
-        statusLead.textContent = `Done (${res.passes} pass${res.passes===1?"":"es"})`;
+        const isOK = resp.ok;
+        let data;
+        try { data = await resp.json(); } catch { data = {}; }
 
-        let finalCss = res.css || "";
-        // Safety: if we forced solid, strip any gradient that slipped through
-        if (flat && /gradient\(/i.test(finalCss)) {
-          finalCss = solidifyCss(finalCss, avgHex);
-        }
-        outputEl.textContent = finalCss;
+        apiLine.textContent = `API: ${resp.status} ${isOK ? 'OK' : (data?.error || 'Error')}`;
+        setStatus(isOK, isOK ? 'Done' : 'Error');
 
-        if (!finalCss.trim()) {
-          errorsEl.textContent = `Model raw_out (first 2k):\n` + String(res.raw_out || "").slice(0, 2000);
+        if (isOK) {
+          const css = data?.css && String(data.css).trim();
+          outputEl.textContent = css || '/* No CSS returned */';
+          const preview = (data?.raw_out_preview && String(data.raw_out_preview).trim()) || '— none returned —';
+          apiRaw.textContent = preview;
         } else {
-          errorsEl.textContent = "";
+          outputEl.textContent = '/* Error — no CSS */';
+          const rawPreview = (data?.raw_out_preview && String(data.raw_out_preview).trim()) || '';
+          const details = data?.details ? `Details: ${data.details}` : '';
+          const extra = data?.extra ? `\n\nExtra:\n${data.extra}` : '';
+          apiRaw.textContent = (rawPreview || `${details}${extra}` || '— no raw preview —');
         }
-      } catch (err) {
-        apiStatus.textContent = String(err.status || 500); apiStatus.style.color = "#ef4444";
-        statusLead.textContent = "Error";
-        const dump = [
-          `Status: ${err.status ?? 'unknown'}`,
-          `Message: ${fmt(err.message)}`,
-          err.payload !== undefined ? `Payload:\n${fmt(err.payload)}` : ""
-        ].filter(Boolean).join("\n");
-        errorsEl.textContent = dump;
-        console.error("API error dump:", err);
+      } catch (e) {
+        setStatus(false, 'Network error');
+        apiLine.textContent = 'API: request failed';
+        outputEl.textContent = '/* Request failed — see raw pane */';
+        apiRaw.textContent = String(e?.message || e || 'Unknown error');
       } finally {
-        setLoading(false);
-        runBtn.disabled = false;
+        showScrim(false);
+        goBtn.disabled = false;
       }
-    }
+    });
 
-    function clearOutputs(){
-      outputEl.textContent = ""; errorsEl.textContent = "";
-      apiStatus.textContent = "—"; apiStatus.style.color = ""; statusLead.textContent = "";
-    }
-    function copyFlash(btn){ const prev=btn.textContent; btn.textContent="Copied!"; setTimeout(()=>btn.textContent=prev, 900); }
+    // Copy CSS
+    copyBtn.addEventListener('click', async () => {
+      const txt = outputEl.textContent || '';
+      if (!txt.trim()) return;
+      try {
+        await navigator.clipboard.writeText(txt);
+        copyBtn.textContent = 'Copied!';
+        setTimeout(() => copyBtn.textContent = 'Copy', 900);
+      } catch {}
+    });
+
+    // Clear
+    clearBtn.addEventListener('click', () => {
+      setImage("");
+      scopeEl.value = ".comp";
+      compEl.value = "button";
+      checksEl.value = "1";
+      flatToggleEl.checked = false;
+      flatColorEl.value = "";
+      outputEl.textContent = '/* Your CSS will appear here */';
+      resetStatus();
+    });
   </script>
 </body>
 </html>
