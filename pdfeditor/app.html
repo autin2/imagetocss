@@ -76,7 +76,6 @@
 
     /* Right side panels: fixed heights to avoid growth reflow */
     .code#output{ height: 280px; }
-    #apiRaw.code{ height: 200px; }
 
     .copy-row{ display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:8px; }
     .copy-row .label{ color:var(--muted); font-size:13px; }
@@ -165,19 +164,18 @@
         <div class="panel head">Results</div>
         <div class="panel body">
           <div class="copy-row">
-            <div class="label">Final CSS</div>
+            <div class="label">Finished CSS</div>
             <button id="copyBtn" class="copy">Copy</button>
           </div>
           <pre id="output" class="code">/* Your CSS will appear here */</pre>
 
           <div class="copy-row" style="margin-top:14px;">
-            <div class="label">API response / raw preview</div>
+            <div class="label">API Errors</div>
           </div>
           <div style="display:flex; align-items:center; gap:10px; margin-bottom:6px;">
             <div id="apiLine" class="label">API: –</div>
           </div>
-          <div class="label" style="margin:6px 0 4px;">Model raw_out (first 2k):</div>
-          <pre id="apiRaw" class="code">(none yet)</pre>
+          <pre id="apiErrors" class="code">— none —</pre>
         </div>
       </section>
     </div>
@@ -208,7 +206,7 @@
     const copyBtn = document.getElementById('copyBtn');
     const apiLine = document.getElementById('apiLine');
     const apiPill = document.getElementById('apiPill');
-    const apiRaw = document.getElementById('apiRaw');
+    const apiErrorsEl = document.getElementById('apiErrors');
 
     const scrim = document.getElementById('scrim');
 
@@ -226,14 +224,14 @@
     function resetStatus(){
       apiPill.style.display = 'none';
       apiLine.textContent = 'API: –';
-      apiRaw.textContent = '(none yet)';
+      apiErrorsEl.textContent = '— none —';
     }
-    function toDataUrl(file){
+    function toDataUrl(fileOrBlob){
       return new Promise((resolve, reject) => {
         const r = new FileReader();
         r.onload = () => resolve(r.result);
         r.onerror = reject;
-        r.readAsDataURL(file);
+        r.readAsDataURL(fileOrBlob);
       });
     }
     function setImage(src){
@@ -267,7 +265,7 @@
       e.preventDefault();
       fileInput.click();
     });
-    // If image present, clicking the box also opens chooser
+    // If image present, clicking the box also opens chooser (but not overlay button)
     selectBox.addEventListener('click', (e) => {
       if (selectBox.classList.contains('has-image') && !e.target.closest('.change-overlay')){
         fileInput.click();
@@ -335,7 +333,6 @@
     goBtn.addEventListener('click', async () => {
       if (!dataUrl){ alert('Please select an image first.'); return; }
 
-      // build payload
       const payload = {
         image: dataUrl,
         scope: scopeEl.value || ".comp",
@@ -344,14 +341,14 @@
         force_solid: !!flatToggleEl.checked,
         solid_color: (flatColorEl.value || "").trim(),
         minify: false,
-        debug: true
+        debug: false   // <- no raw model dump
       };
 
       showScrim(true);
       goBtn.disabled = true;
       setStatus(true, 'Working…');
       apiLine.textContent = 'API: (requesting…)';
-      apiRaw.textContent = '(awaiting model output)';
+      apiErrorsEl.textContent = '— none —';
 
       try {
         const resp = await fetch('/api/generate-css', {
@@ -370,20 +367,21 @@
         if (isOK) {
           const css = data?.css && String(data.css).trim();
           outputEl.textContent = css || '/* No CSS returned */';
-          const preview = (data?.raw_out_preview && String(data.raw_out_preview).trim()) || '— none returned —';
-          apiRaw.textContent = preview;
+          apiErrorsEl.textContent = '— none —';
         } else {
           outputEl.textContent = '/* Error — no CSS */';
-          const rawPreview = (data?.raw_out_preview && String(data.raw_out_preview).trim()) || '';
-          const details = data?.details ? `Details: ${data.details}` : '';
-          const extra = data?.extra ? `\n\nExtra:\n${data.extra}` : '';
-          apiRaw.textContent = (rawPreview || `${details}${extra}` || '— no raw preview —');
+          const payload = {
+            error: data?.error || 'Unknown',
+            details: data?.details || undefined,
+            extra: data?.extra || undefined
+          };
+          apiErrorsEl.textContent = JSON.stringify(payload, null, 2);
         }
       } catch (e) {
         setStatus(false, 'Network error');
         apiLine.textContent = 'API: request failed';
-        outputEl.textContent = '/* Request failed — see raw pane */';
-        apiRaw.textContent = String(e?.message || e || 'Unknown error');
+        outputEl.textContent = '/* Request failed — see errors pane */';
+        apiErrorsEl.textContent = JSON.stringify({ error: String(e?.message || e || 'Unknown error') }, null, 2);
       } finally {
         showScrim(false);
         goBtn.disabled = false;
