@@ -2,6 +2,8 @@
 // Component-scoped CSS generator with critique→fix loops, robust GPT-5/4o support,
 // empty-output recovery (vision fallback + text-only), CSS autofix,
 // and a final pass that returns a WORKING HTML snippet for the styles.
+// HTML generation now uses the IMAGE (so button text like "Subscribe" is preserved)
+// and post-fills any elements implied by CSS (e.g., generic ".comp input { ... }").
 //
 // ENV:
 //   OPENAI_API_KEY (required)
@@ -24,9 +26,7 @@ const MODEL_CHAIN = [
 const DEFAULT_MODEL = MODEL_CHAIN[0] || "gpt-4o-mini";
 
 /* Heuristic: models that reliably support image_url in Chat Completions */
-function supportsVision(model) {
-  return /gpt-4o(-mini)?$/i.test(model);
-}
+function supportsVision(model) { return /gpt-4o(-mini)?$/i.test(model); }
 function isGpt5(m){ return /^gpt-5(\b|-)/i.test(m); }
 
 /* ---------------- HTTP handler ---------------- */
@@ -71,9 +71,7 @@ export default async function handler(req, res) {
     const baseModel = await resolveModel();
 
     // ---------- DRAFT (with robust fallbacks) ----------
-    let draft = await safeDraft({
-      baseModel, image, palette, scope, component, callOnce
-    });
+    let draft = await safeDraft({ baseModel, image, palette, scope, component, callOnce });
     draft = enforceScope(draft, scope);
 
     let css = draft;
@@ -105,13 +103,17 @@ export default async function handler(req, res) {
     if (force_solid) css = flattenGradients(css, solid_color);
     if (minify) css = minifyCss(css);
 
-    // ---------- HTML SNIPPET ----------
-    let html = await suggestHtml({ baseModel, image, css, scope, component, callOnce });
+    // ---------- HINTS (image OCR for labels/placeholders) ----------
+    const hints = await extractHints({ baseModel, image, css, scope, component, callOnce });
+
+    // ---------- HTML SNIPPET (vision + CSS-coverage) ----------
+    let html = await suggestHtml({ baseModel, image, css, scope, component, hints, callOnce });
     if (!html || !html.trim()) {
       html = buildHtmlFromCss(css, scope) || ensureScopedHtml(`<div>${fallbackInner(component)}</div>`, scope);
     }
-    html = htmlOnly(html);
-    html = ensureScopedHtml(html, scope);
+    html = ensureScopedHtml(htmlOnly(html), scope);
+    html = ensureHtmlCoversCss(html, css, hints, scope);        // ensure input/button presence
+    html = applyTextHints(html, hints);                         // e.g., button "Subscribe"
 
     const payload = {
       draft,
@@ -123,9 +125,9 @@ export default async function handler(req, res) {
       notes: lastCritique,
       scope,
       component,
-      used_model: baseModel
+      used_model: baseModel,
+      ...(debug ? { debug: { model_chain: MODEL_CHAIN, vision_supported: supportsVision(baseModel), hints } } : {})
     };
-    if (debug) payload.debug = { model_chain: MODEL_CHAIN, vision_supported: supportsVision(baseModel) };
 
     res.setHeader("Cache-Control", "no-store");
     return res.status(200).json(payload);
@@ -139,7 +141,7 @@ export default async function handler(req, res) {
 
 function buildChatParams({ model, messages, kind }) {
   const base = { model, messages };
-  const BUDGET = { draft: 1200, critique: 700, fix: 1400, html: 600 };
+  const BUDGET = { draft: 1200, critique: 700, fix: 1400, html: 600, hints: 300 };
   const max = BUDGET[kind] || 900;
 
   if (isGpt5(model)) {
@@ -207,7 +209,13 @@ function makeOpenAI(client) {
       html:
         "Return HTML ONLY (no Markdown, no code fences). Produce a minimal DOM snippet that DEMONSTRATES the styles " +
         "defined by the provided CSS. The ROOT must be a single element using the provided SCOPE CLASS (e.g., <div class=\".comp\">). " +
-        "Use reasonable placeholder text/values. Prefer semantic elements (button, input, label, a, img) as indicated by selectors."
+        "Use reasonable placeholder text/values. Prefer semantic elements (button, input, label, a, img) as indicated by selectors. " +
+        "Infer visible button text (e.g., 'Subscribe') and input placeholder from the screenshot when present.",
+      hints:
+        "Return JSON ONLY. Extract UI strings from the screenshot of a SINGLE component: " +
+        "{ \"has_input\": boolean, \"input_type\": \"text|email|search|password|other|unknown\", " +
+        "\"input_placeholder\": string, \"has_button\": boolean, \"button_text\": string }. " +
+        "Keep strings short; if not visible, use empty string. No extra fields."
     }[kind];
 
     // Build messages (image + text OR text-only)
@@ -284,14 +292,34 @@ function makeOpenAI(client) {
     } else if (kind === "html") {
       const usr = [
         ...baseLines,
-        "Generate the minimal HTML snippet that will pick up ALL styles in the CSS.",
-        "ROOT must be a single element that uses the scope class.",
+        "Generate the minimal HTML snippet that will pick up ALL styles in the CSS. " +
+        "ROOT must be a single element that uses the scope class. " +
+        "Include every element type the CSS targets (e.g., input + button), " +
+        "and prefer using the exact visible text from the screenshot for primary CTAs.",
         "", "CSS:", "```css", args.css, "```",
+        args.hints ? `\nHINTS JSON: ${JSON.stringify(args.hints)}` : ""
       ].join("\n");
 
       messages = [
         { role: "system", content: sys },
-        { role: "user", content: [{ type: "text", text: usr }] } // text-only
+        { role: "user",
+          content: [
+            { type: "text", text: usr },
+            ...(args.image && !args.no_image ? [{ type: "image_url", image_url: { url: args.image, detail: "high" } }] : [])
+          ]
+        }
+      ];
+
+    } else if (kind === "hints") {
+      const usr = [
+        ...baseLines,
+        "Extract labels from this screenshot.",
+        "Return JSON ONLY as specified. No code fences."
+      ].join("\n");
+
+      messages = [
+        { role: "system", content: sys },
+        { role: "user", content: [{ type: "text", text: usr }, { type: "image_url", image_url: { url: args.image, detail: "high" } }] }
       ];
     } else {
       throw new Error(`Unknown kind: ${kind}`);
@@ -302,6 +330,7 @@ function makeOpenAI(client) {
 
     if (kind === "critique") return textOnly(r?.choices?.[0]?.message?.content || "");
     if (kind === "html")     return htmlOnly(r?.choices?.[0]?.message?.content || "");
+    if (kind === "hints")    return jsonOnly(r?.choices?.[0]?.message?.content || "{}");
     // draft/fix
     return cssOnly(r?.choices?.[0]?.message?.content || (kind === "fix" ? args.css : ""));
   };
@@ -347,14 +376,20 @@ async function safeFix(args) {
   catch { return args.css || ""; }
 }
 
-/* Generate HTML after CSS is finalized */
-async function suggestHtml({ baseModel, image, css, scope, component, callOnce }) {
+/* Extract button label / placeholder via vision */
+async function extractHints({ baseModel, image, css, scope, component, callOnce }) {
   try {
-    // We intentionally use a TEXT-ONLY prompt for determinism.
-    const html = await callOnce("html", { model: baseModel, css, scope, component, no_image: true });
-    return htmlOnly(html);
+    const json = await callOnce("hints", { model: baseModel, image, scope, component });
+    // Validate shape
+    return {
+      has_input: !!json?.has_input,
+      input_type: String(json?.input_type || "").toLowerCase(),
+      input_placeholder: typeof json?.input_placeholder === "string" ? json.input_placeholder : "",
+      has_button: !!json?.has_button,
+      button_text: typeof json?.button_text === "string" ? json.button_text : ""
+    };
   } catch {
-    return "";
+    return { has_input: false, input_type: "", input_placeholder: "", has_button: false, button_text: "" };
   }
 }
 
@@ -392,6 +427,13 @@ function htmlOnly(s = "") {
     .replace(/^```(?:html)?\s*/i, "")
     .replace(/```$/i, "")
     .trim();
+}
+function jsonOnly(s = "") {
+  const raw = String(s || "");
+  try { return JSON.parse(raw); } catch {}
+  const m = raw.match(/\{[\s\S]*\}/);
+  if (m) { try { return JSON.parse(m[0]); } catch {} }
+  return {};
 }
 
 /** Prefix non-@, non-:root top-level selectors with scope */
@@ -440,10 +482,11 @@ function minifyCss(css = "") {
     .trim();
 }
 
-/* Build a reasonable HTML snippet from selectors if the model doesn't return one */
+/* Build a reasonable HTML snippet from selectors */
 function buildHtmlFromCss(css, scope) {
   const className = getScopeClass(scope);
   const need = {
+    inputGeneric: /(^|[^\w-])input(\b|[\s\[#.:>{,])/i.test(css),
     inputText: /\binput\[type\s*=\s*["']?text["']?\]/i.test(css),
     inputEmail: /\binput\[type\s*=\s*["']?email["']?\]/i.test(css),
     inputSearch: /\binput\[type\s*=\s*["']?search["']?\]/i.test(css),
@@ -457,7 +500,7 @@ function buildHtmlFromCss(css, scope) {
 
   const parts = [];
   if (need.label) parts.push(`<label for="field">Label</label>`);
-  if (need.inputText) parts.push(`<input id="field" type="text" placeholder="Enter text">`);
+  if (need.inputText || need.inputGeneric) parts.push(`<input id="field" type="text" placeholder="Enter text">`);
   if (need.inputEmail) parts.push(`<input type="email" placeholder="name@example.com">`);
   if (need.inputSearch) parts.push(`<input type="search" placeholder="Search">`);
   if (need.textarea) parts.push(`<textarea rows="3" placeholder="Type here"></textarea>`);
@@ -465,9 +508,19 @@ function buildHtmlFromCss(css, scope) {
   if (need.img) parts.push(`<img alt="preview" src="https://dummyimage.com/80x48/ddd/999.png&text=img">`);
   if (need.a) parts.push(`<a href="#">Link</a>`);
   if (need.button) parts.push(`<button>Submit</button>`);
-  if (!parts.length) parts.push(`Button`); // bare content when nothing obvious
+  if (!parts.length) parts.push(`Button`);
 
   return `<div class="${className}">\n  ${parts.join("\n  ")}\n</div>`;
+}
+
+/* Ask model for an HTML snippet, with image & hints */
+async function suggestHtml({ baseModel, image, css, scope, component, hints, callOnce }) {
+  try {
+    const html = await callOnce("html", { model: baseModel, image, css, scope, component, hints });
+    return htmlOnly(html);
+  } catch {
+    return "";
+  }
 }
 
 function ensureScopedHtml(html, scope) {
@@ -478,10 +531,45 @@ function ensureScopedHtml(html, scope) {
   return `<div class="${className}">\n${html.trim()}\n</div>`;
 }
 
-function getScopeClass(scope = ".comp") {
-  return String(scope || ".comp").trim().replace(/^\./, "");
+/* If CSS references inputs/buttons but HTML lacks them, inject reasonable defaults */
+function ensureHtmlCoversCss(html, css, hints, scope) {
+  let out = html.trim();
+  const hasInputCSS = /(^|[^\w-])input(\b|[\s\[#.:>{,])/i.test(css);
+  const hasButtonCSS = /\bbutton\b/i.test(css);
+  const hasInputHTML = /<input\b/i.test(out);
+  const hasButtonHTML = /<button\b/i.test(out);
+
+  if (hasInputCSS && !hasInputHTML) {
+    out = out.replace(/(<\/[a-z0-9-]+>\s*)$/i, `  <input type="text" placeholder="${escapeHtml(hints?.input_placeholder || 'Enter text')}">\n$1`);
+  }
+  if (hasButtonCSS && !hasButtonHTML) {
+    out = out.replace(/(<\/[a-z0-9-]+>\s*)$/i, `  <button>${escapeHtml(hints?.button_text || 'Submit')}</button>\n$1`);
+  }
+  return out;
 }
+
+/* Replace generic button/placeholder text with vision-derived strings */
+function applyTextHints(html, hints) {
+  if (!hints) return html;
+  let out = html;
+
+  if (hints.button_text) {
+    out = out.replace(/(<button[^>]*>)([\s\S]*?)(<\/button>)/i, (_, a, _txt, c) => `${a}${escapeHtml(hints.button_text)}${c}`);
+  }
+  if (hints.input_placeholder) {
+    out = out.replace(/(<input\b[^>]*)(placeholder=["'][^"']*["'])?/i, (m, head, ph) => {
+      if (/placeholder=/i.test(m)) {
+        return m.replace(/placeholder=["'][^"']*["']/i, `placeholder="${escapeHtml(hints.input_placeholder)}"`);
+      }
+      return `${head} placeholder="${escapeHtml(hints.input_placeholder)}"`;
+    });
+  }
+  return out;
+}
+
+function getScopeClass(scope = ".comp") { return String(scope || ".comp").trim().replace(/^\./, ""); }
 function escapeReg(s){ return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+function escapeHtml(s=""){ return String(s).replace(/[&<>"']/g, m=>({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[m])); }
 function fallbackInner(componentHint = "component") {
   if (/input|field/i.test(componentHint)) return `<input type="text" placeholder="Enter text">`;
   if (/link|anchor/i.test(componentHint)) return `<a href="#">Link</a>`;
