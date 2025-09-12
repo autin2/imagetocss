@@ -1,23 +1,23 @@
 // /api/generate-css.js
-// Vision → JSON spec → deterministic codegen (segmented chips now support groups)
+// Vision → JSON spec (with segmented groups) → deterministic CSS + HTML
 // Returns: { css, html, spec, notes, scope, component, used_model }
 
 import OpenAI from "openai";
 
-/* ---------------- Model selection ---------------- */
+/* ---------- Model selection ---------- */
 const MODEL_CHAIN = [
-  process.env.OPENAI_MODEL, // optional override
+  process.env.OPENAI_MODEL,      // optional override via env
   "gpt-5",
   "gpt-5-mini",
   "gpt-4o",
-  "gpt-4o-mini"
+  "gpt-4o-mini",
 ].filter(Boolean);
 
 const FALLBACK_MODEL = "gpt-4o-mini";
 const isGpt5 = (m) => /^gpt-5(\b|-)/i.test(m);
 const supportsVision = (m) => /gpt-4o(?:-mini)?$/i.test(m);
 
-/* ---------------- Handler ---------------- */
+/* ---------- HTTP handler ---------- */
 export default async function handler(req, res) {
   try {
     if (req.method !== "POST") {
@@ -38,7 +38,7 @@ export default async function handler(req, res) {
       component = "component",
       force_solid = false,
       solid_color = "",
-      debug = false
+      debug = false,
     } = body;
 
     if (!image || typeof image !== "string" || !/^data:image\//i.test(image)) {
@@ -49,34 +49,32 @@ export default async function handler(req, res) {
     }
 
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-    const model = await resolveUsableModel(client);
+    const chosenModel = await resolveUsableModel(client);
 
-    // 1) Vision → strict JSON spec (segmented: supports groups)
-    let spec = await getStyleSpec(client, model, { image, scope, component });
+    // ---- Pass 1: general spec
+    let spec = await getStyleSpec(client, chosenModel, { image, scope, component });
 
-    // 1.5) Heuristic repair for segmented chips (if groups missing/weak)
-    spec = repairSegmented(spec);
+    // ---- Pass 2 (only if needed): force segmented groups
+    if (!isSegmentedWithGroups(spec)) {
+      const forced = await getSegmentedSpec(client, chosenModel, { image, scope, component });
+      if (isSegmentedWithGroups(forced)) spec = forced;
+      else spec = repairSegmented(spec); // heuristic repair (last resort)
+    }
 
-    // 2) Deterministic codegen
-    let { css, html, notes } = codegen(spec, { scope, force_solid, solid_color });
+    // ---- Codegen
+    const { css: rawCss, html: rawHtml, notes } = codegen(spec, { scope, force_solid, solid_color });
 
-    // 3) Safety: scope + autofix + base font/reset + ensure scoped HTML wrapper
-    css = enforceScope(css, scope);
-    css = prettyCss(autofixCss(css));       // make it readable even if model spacing was messy
+    let css = enforceScope(rawCss, scope);
+    css = prettyCss(autofixCss(css));
     css = ensureBaseFontAndResets(css, scope);
-    html = ensureScopedHtml(html, scope);
+
+    let html = ensureScopedHtml(rawHtml, scope);
 
     if (!css.trim()) return sendError(res, 502, "Model returned empty CSS spec");
 
     res.setHeader("Cache-Control", "no-store");
     return res.status(200).json({
-      css,
-      html,
-      spec,
-      notes,
-      scope,
-      component,
-      used_model: model,
+      css, html, spec, notes, scope, component, used_model: chosenModel,
       ...(debug ? { debug: { model_chain: MODEL_CHAIN } } : {})
     });
   } catch (err) {
@@ -84,7 +82,7 @@ export default async function handler(req, res) {
   }
 }
 
-/* ---------------- OpenAI glue ---------------- */
+/* ---------- OpenAI glue ---------- */
 
 async function resolveUsableModel(client) {
   for (const m of (MODEL_CHAIN.length ? MODEL_CHAIN : [FALLBACK_MODEL])) {
@@ -108,26 +106,93 @@ async function resolveUsableModel(client) {
 async function getStyleSpec(client, model, { image, scope, component }) {
   const useModel = supportsVision(model) ? model : "gpt-4o";
   const sys =
-    "You are a UI vision measurer. Return STRICT JSON describing either a single component or a composite control.\n" +
-    "If you see a pill/segmented control with multiple rounded chips, return type:'segmented' WITH groups[]; " +
-    "each group corresponds to one rounded capsule. In each group, list items[] in left→right order and mark:\n" +
-    "- role: 'label'|'value'|'link'|'dropdown'|'action'|'icon'|'divider'\n" +
-    "- text: exact visible text (verbatim)\n" +
-    "- caret: true if a ▼/▾/chevron is present next to the text\n" +
-    "- icon_x: true if an encircled × precedes the text\n" +
-    "For banners/containers return type:'banner' and children[]. No markdown, only JSON.";
+    "You are a UI vision measurer. Return STRICT JSON describing the component(s). " +
+    "If you see a pill/segmented control with multiple rounded capsules, return type:'segmented' WITH groups[]. " +
+    "Each group corresponds to one rounded capsule. Inside each group, items[] appear left→right. " +
+    "For every item, include: role ('label'|'value'|'link'|'dropdown'|'action'|'icon'|'divider'), text (verbatim), " +
+    "caret (bool), icon_x (bool), active (bool). For banners/containers, use type:'banner'. No markdown, JSON only.";
 
-  // Composite + segmented schema with groups
-  const schema = {
+  const schema = baseSchema();
+  const usr = [
+    `SCOPE: ${scope}`,
+    `COMPONENT HINT: ${component}`,
+    "Return ONLY JSON matching this schema:",
+    JSON.stringify(schema),
+    "",
+    "Guidelines:",
+    "- Extract EVERY visible text fragment; do not summarize.",
+    "- If you see multiple rounded capsules (chips), you MUST produce type:'segmented' with groups[].",
+    "- Use role:'link' for blue link-like text; set caret:true for ▼/▾/chevron.",
+    "- Use icon_x:true for an encircled × preceding text."
+  ].join("\n");
+
+  const params = isGpt5(useModel)
+    ? { max_completion_tokens: 1200 }
+    : { max_tokens: 1200, temperature: 0.1 };
+
+  const r = await client.chat.completions.create({
+    model: useModel,
+    messages: [
+      { role: "system", content: sys },
+      { role: "user", content: [
+          { type: "text", text: usr },
+          { type: "image_url", image_url: { url: image, detail: "high" } }
+      ] }
+    ],
+    ...params
+  });
+
+  const raw = r?.choices?.[0]?.message?.content || "{}";
+  return safeParseJson(raw);
+}
+
+async function getSegmentedSpec(client, model, { image, scope, component }) {
+  // Stronger instruction that *forces* segmented groups if visually plausible.
+  const useModel = supportsVision(model) ? model : "gpt-4o";
+  const sys =
+    "Return STRICT JSON for a SEGMENTED control made of multiple rounded chips if present. " +
+    "Prefer type:'segmented' with groups[] unless it is clearly a single, non-segmented component. " +
+    "Each group is one rounded capsule. In each group, list items[] with role/text/caret/icon_x/active. No markdown.";
+  const schema = baseSchema();
+
+  const usr = [
+    `SCOPE: ${scope}`,
+    `COMPONENT HINT: ${component}`,
+    "Force segmented recognition if you see 2+ rounded capsules:",
+    JSON.stringify(schema)
+  ].join("\n");
+
+  const params = isGpt5(useModel)
+    ? { max_completion_tokens: 900 }
+    : { max_tokens: 900, temperature: 0.1 };
+
+  const r = await client.chat.completions.create({
+    model: useModel,
+    messages: [
+      { role: "system", content: sys },
+      { role: "user", content: [
+          { type: "text", text: usr },
+          { type: "image_url", image_url: { url: image, detail: "high" } }
+      ] }
+    ],
+    ...params
+  });
+
+  const raw = r?.choices?.[0]?.message?.content || "{}";
+  return safeParseJson(raw);
+}
+
+/* ---------- Schema & checks ---------- */
+
+function baseSchema() {
+  return {
     type: "object",
     properties: {
       type: { enum: ["button","input","segmented","chip","badge","link","card","toggle","checkbox","radio","banner","container","unknown"] },
       text: { type: "string" },
       html_hint: { enum: ["button","a","input","div"] },
-      // SEGMENTED
       groups: {
         type: "array",
-        description: "For segmented controls: array of pill groups; each contains items in visual order",
         items: {
           type: "object",
           properties: {
@@ -149,21 +214,10 @@ async function getStyleSpec(client, model, { image, scope, component }) {
           required: ["items"]
         }
       },
-      // LEGACY (kept for backward compatibility)
       items: { type: "array", items: { type: "object" } },
-      // common
-      font: {
-        type: "object",
-        properties: { family_hint:{type:"string"}, size_px:{type:"number"}, weight:{type:"string"} }
-      },
-      colors: {
-        type: "object",
-        properties: { text:{type:"string"}, muted:{type:"string"}, link:{type:"string"}, bg:{type:"string"}, border:{type:"string"}, divider:{type:"string"} }
-      },
-      border: {
-        type: "object",
-        properties: { width_px:{type:"number"}, style:{type:"string"}, color:{type:"string"}, radius_px:{type:"number"} }
-      },
+      font: { type: "object", properties: { family_hint:{type:"string"}, size_px:{type:"number"}, weight:{type:"string"} } },
+      colors: { type: "object", properties: { text:{type:"string"}, muted:{type:"string"}, link:{type:"string"}, bg:{type:"string"}, border:{type:"string"}, divider:{type:"string"} } },
+      border: { type: "object", properties: { width_px:{type:"number"}, style:{type:"string"}, color:{type:"string"}, radius_px:{type:"number"} } },
       padding: { type: "object", properties: { t:{type:"number"}, r:{type:"number"}, b:{type:"number"}, l:{type:"number"} } },
       background: {
         type: "object",
@@ -172,7 +226,10 @@ async function getStyleSpec(client, model, { image, scope, component }) {
           color: { type: "string" },
           gradient: {
             type: "object",
-            properties: { direction:{type:"string"}, stops:{ type:"array", items:{ type:"object", properties:{ color:{type:"string"}, pct:{type:"number"} }, required:["color"] } } }
+            properties: {
+              direction:{type:"string"},
+              stops:{ type:"array", items:{ type:"object", properties:{ color:{type:"string"}, pct:{type:"number"} }, required:["color"] } }
+            }
           }
         }
       },
@@ -180,81 +237,34 @@ async function getStyleSpec(client, model, { image, scope, component }) {
         type: "array",
         items: { type:"object", properties:{ x:{type:"number"}, y:{type:"number"}, blur:{type:"number"}, spread:{type:"number"}, rgba:{type:"string"} },
                  required:["x","y","blur","spread","rgba"] }
-      }
+      },
+      children: { type: "array", items: { type: "object" } }
     },
     required: ["type","font","colors","border","padding","background"]
   };
-
-  const usr = [
-    `SCOPE: ${scope}`,
-    `COMPONENT HINT: ${component}`,
-    "Return ONLY JSON that matches this schema exactly:",
-    JSON.stringify(schema),
-    "",
-    "Guidelines:",
-    "- Extract EVERY visible text fragment; do not summarize.",
-    "- For segmented chips, you MUST split into groups[] by each rounded capsule.",
-    "- Mark link-like blue text as role:'link'. Mark caret where a ▼/▾ glyph is visible.",
-    "- Preceding encircled × becomes { role:'icon', icon_x:true }."
-  ].join("\n");
-
-  const params = isGpt5(useModel)
-    ? { max_completion_tokens: 1400 }
-    : { max_tokens: 1400, temperature: 0.1 };
-
-  const r = await client.chat.completions.create({
-    model: useModel,
-    messages: [
-      { role: "system", content: sys },
-      { role: "user", content: [
-          { type:"text", text: usr },
-          { type:"image_url", image_url: { url: image, detail: "high" } }
-      ] }
-    ],
-    ...params
-  });
-
-  const raw = r?.choices?.[0]?.message?.content || "{}";
-  return safeParseJson(raw);
 }
 
-/* ---------------- Heuristic repair for segmented ---------------- */
+function isSegmentedWithGroups(spec) {
+  return spec && (spec.type === "segmented" || spec.type === "chip") && Array.isArray(spec.groups) && spec.groups.length > 0;
+}
+
+/* ---------- Heuristic segmented repair (last resort) ---------- */
 
 function repairSegmented(spec) {
-  if (!spec || (spec.type !== "segmented" && spec.type !== "chip")) return spec;
-
+  if (!spec || (spec.type !== "segmented" && spec.type !== "chip" && spec.type !== "container" && spec.type !== "banner" && spec.type !== "unknown")) {
+    return spec;
+  }
   const s = { ...spec };
-  // If groups missing but flat items exist, try to split:
+  // If groups missing but flat items exist, wrap them as one group.
   if ((!s.groups || !s.groups.length) && Array.isArray(s.items) && s.items.length) {
-    // Very simple: if we see both "Compare" and "Previous period", split after "Daily" (typical 3+2 layout)
-    const texts = s.items.map(i => (i.text || "").toLowerCase());
-    const hasCompare = texts.some(t => t.includes("compare"));
-    const hasPrev = texts.some(t => t.includes("previous"));
-    if (hasCompare && hasPrev) {
-      const left = [];
-      const right = [];
-      let toRight = false;
-      for (const it of s.items) {
-        const t = (it.text || "").toLowerCase();
-        if (!toRight && (t.includes("compare"))) toRight = true;
-        (toRight ? right : left).push(it);
-      }
-      s.groups = [
-        { items: normalizeSegItems(left) },
-        { items: normalizeSegItems(right) }
-      ];
-    } else {
-      s.groups = [{ items: normalizeSegItems(s.items) }];
-    }
-  } else if (s.groups?.length) {
-    // normalize each group
-    s.groups = s.groups.map(g => ({ items: normalizeSegItems(g.items || []) }));
+    s.type = "segmented";
+    s.groups = [{ items: normalizeSegItems(s.items) }];
   }
   return s;
 }
 
 function normalizeSegItems(items) {
-  return items.map(it => ({
+  return (items || []).map(it => ({
     role: it.role || "value",
     text: it.text || "",
     caret: !!it.caret,
@@ -263,37 +273,33 @@ function normalizeSegItems(items) {
   }));
 }
 
-/* ---------------- Deterministic codegen ---------------- */
+/* ---------- Codegen ---------- */
 
 function codegen(spec, opts) {
   const scope = opts?.scope || ".comp";
-  const className = getScopeClass(scope);
   const s = normalizeSpec(spec);
-  const notes = [];
 
-  if ((s.type === "banner" || s.type === "container") && s.children?.length) {
-    return codegenBanner(s, opts);
-  }
-  if (s.type === "segmented" && s.groups?.length) {
+  if ((s.type === "segmented" || s.type === "chip") && s.groups?.length) {
     return codegenSegmentedGroups(s, opts);
   }
+  if (s.type === "banner" || s.type === "container" || s.children?.length) {
+    return codegenBanner(s, opts);
+  }
 
-  // Button/input/legacy segmented fallback
+  // Fallbacks (button/input/simple chip)
   const baseFont = `font: ${px(s.font.size_px || 14)}/${1.25} ${s.font.family_hint || 'system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif'};`;
   const textColor = s.colors.text || "#374151";
   const bg = buildBackground(s.background, opts);
   const border = `${px(s.border.width_px || 1)} ${s.border.style || "solid"} ${s.border.color || "#e5e7eb"}`;
   const radius = px(s.border.radius_px || 8);
-  const boxShadow = buildShadow(s.shadow);
   const pd = s.padding || {};
   const padding = `${px(pd.t ?? 8)} ${px(pd.r ?? 12)} ${px(pd.b ?? 8)} ${px(pd.l ?? 12)}`;
+  const boxShadow = buildShadow(s.shadow);
 
-  let css = "";
-  let html = "";
+  let css = "", html = "", notes = "";
 
-  switch (s.type) {
-    case "button": {
-      css = `
+  if (s.type === "button") {
+    css = `
 ${scope}{ ${baseFont} color:${textColor}; }
 ${scope} .btn{
   appearance:none;-webkit-appearance:none;
@@ -307,74 +313,35 @@ ${scope} .btn:hover{ filter:brightness(1.04); }
 ${scope} .btn:active{ transform:translateY(1px); }
 ${scope} .btn:focus-visible{ outline:2px solid #93c5fd; outline-offset:2px; }
 `.trim();
-      const label = s.text || "Button";
-      html = `<div class="${className}">\n  <button class="btn">${escapeHtml(label)}</button>\n</div>`;
-      break;
-    }
-    case "input": {
-      const inputType = s.html_hint === "input" ? "text" : "text";
-      css = `
+    html = `<div class="${getScopeClass(scope)}">\n  <button class="btn">${escapeHtml(s.text || "Button")}</button>\n</div>`;
+    return { css, html, notes };
+  }
+
+  if (s.type === "input") {
+    css = `
 ${scope}{ ${baseFont} color:${textColor}; }
-${scope} input[type="${inputType}"]{
+${scope} input[type="text"]{
   ${bg} color:${textColor}; border:${border};
   border-radius:${radius}; padding:${padding}; outline:none;
 }
-${scope} input[type="${inputType}"]:focus{ border-color:${s.colors.border || "#9ca3af"}; box-shadow:0 0 0 3px rgba(59,130,246,.2); }
+${scope} input[type="text"]:focus{ border-color:${s.colors.border || "#9ca3af"}; box-shadow:0 0 0 3px rgba(59,130,246,.2); }
 `.trim();
-      html = `<div class="${className}">\n  <input type="${inputType}" placeholder="${escapeHtml(s.text || "Enter text")}">\n</div>`;
-      break;
-    }
-    case "segmented":
-    case "chip": {
-      // legacy single-chip path
-      const dividerColor = s.colors.divider || s.colors.border || "#e5e7eb";
-      const linkColor = s.colors.link || "#2563eb";
-      css = `
-${scope}{ ${baseFont} color:${textColor}; }
-${scope} .chip{ display:inline-flex;align-items:center; border:${border}; border-radius:9999px; background:#fff; padding:2px 6px; }
-${scope} .seg{ display:inline-flex;align-items:center;gap:6px; padding:${padding}; border-radius:9999px; color:${textColor}; text-decoration:none; white-space:nowrap; }
-${scope} button.seg{ appearance:none;-webkit-appearance:none;background:transparent;border:0;font:inherit;color:inherit;padding:${padding}; }
-${scope} .divider{ width:1px;height:18px;margin:0 2px;background:${dividerColor}; }
-${scope} .seg.label{ color:${s.colors.muted || "#6b7280"}; }
-${scope} .seg.link, ${scope} .seg.value.linky{ color:${linkColor}; }
-${scope} .seg.link:hover, ${scope} .seg.value.linky:hover{ color:${shade(linkColor,-10)}; }
-${scope} .icon-x{ width:18px;height:18px;border-radius:9999px;border:1px solid ${shade(dividerColor,-10)}; color:${s.colors.muted || "#6b7280"}; display:inline-flex;align-items:center;justify-content:center;font-size:12px;line-height:1;font-weight:600;margin:0 4px 0 2px; }
-${scope} .icon-x::before{ content:"×"; }
-${scope} .has-caret::after{ content:"▾"; font-size:11px;color:${s.colors.muted || "#6b7280"};margin-left:6px; }
-`.trim();
+    html = `<div class="${getScopeClass(scope)}">\n  <input type="text" placeholder="${escapeHtml(s.text || "Enter text")}">\n</div>`;
+    return { css, html, notes };
+  }
 
-      const parts = [];
-      const items = Array.isArray(s.items) ? s.items : [];
-      items.forEach((it, i) => {
-        if (i>0) parts.push(`<span class="divider"></span>`);
-        const careted = it.caret ? " has-caret" : "";
-        const linky = it.role === "link" || it.role === "dropdown" || it.role === "value" ? " linky" : "";
-        if (it.icon_x) parts.push(`<span class="seg"><span class="icon-x" aria-hidden="true"></span></span>`);
-        if (it.role === "label") parts.push(`<span class="seg label">${escapeHtml(it.text || "")}</span>`);
-        else if (it.role === "link") parts.push(`<a class="seg link${careted}" href="#">${escapeHtml(it.text || "")}</a>`);
-        else parts.push(`<button class="seg value${linky}${careted}">${escapeHtml(it.text || "")}</button>`);
-      });
-
-      html = `<div class="${className}">\n  <div class="chip">\n    ${parts.join("\n    ")}\n  </div>\n</div>`;
-      break;
-    }
-    default: {
-      const cssBlock = `
+  // Generic block (last fallback)
+  css = `
 ${scope}{ ${baseFont} color:${textColor}; }
 ${scope} .block{ ${bg} color:${textColor}; border:${border}; border-radius:${radius}; padding:${padding}; ${boxShadow} }
 `.trim();
-      css = cssBlock;
-      html = `<div class="${className}">\n  <div class="block">${escapeHtml(s.text || "Component")}</div>\n</div>`;
-    }
-  }
-
-  return { css, html, notes };
+  html = `<div class="${getScopeClass(scope)}">\n  <div class="block">${escapeHtml(s.text || "Component")}</div>\n</div>`;
+  return { css, html, notes: "Fallback container (no segmented groups detected)." };
 }
 
-/* --- Segmented with GROUPS (multiple rounded chips) --- */
+/* --- Segmented with GROUPS --- */
 function codegenSegmentedGroups(spec, opts) {
   const scope = opts?.scope || ".comp";
-  const className = getScopeClass(scope);
   const s = normalizeSpec(spec);
 
   const baseFont = `font: ${px(s.font.size_px || 14)}/${1.25} ${s.font.family_hint || 'system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif'};`;
@@ -399,7 +366,7 @@ ${scope} .icon-x::before{ content:"×"; }
 ${scope} .has-caret::after{ content:"▾"; font-size:11px;color:${s.colors.muted || "#6b7280"};margin-left:6px; }
 `.trim();
 
-  const chips = s.groups.map(g => {
+  const chips = (s.groups || []).map(g => {
     const parts = [];
     (g.items || []).forEach((it, i) => {
       if (i>0) parts.push(`<span class="divider"></span>`);
@@ -413,14 +380,13 @@ ${scope} .has-caret::after{ content:"▾"; font-size:11px;color:${s.colors.muted
     return `  <div class="chip">\n    ${parts.join("\n    ")}\n  </div>`;
   });
 
-  const html = `<div class="${className}">\n${chips.join("\n")}\n</div>`;
+  const html = `<div class="${getScopeClass(scope)}">\n${chips.join("\n")}\n</div>`;
   return { css, html, notes: "Segmented groups generated." };
 }
 
-/* --- Banner/container (kept from previous version) --- */
+/* --- Banner/container (composite) --- */
 function codegenBanner(spec, opts) {
   const scope = opts?.scope || ".comp";
-  const className = getScopeClass(scope);
   const s = normalizeSpec(spec);
 
   const baseFont = `font: ${px(s.font.size_px || 14)}/${1.45} ${s.font.family_hint || 'system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif'};`;
@@ -468,7 +434,7 @@ ${scope} .icon::before{ content:"i"; font-weight:700; }
   const iconHtml = hasIcon ? `<span class="icon" aria-hidden="true"></span>` : "";
 
   const html = `
-<div class="${className}">
+<div class="${getScopeClass(scope)}">
   <div class="banner">
     <div class="banner-inner">
       <div class="left">
@@ -488,7 +454,7 @@ ${scope} .icon::before{ content:"i"; font-weight:700; }
   return { css, html, notes: "Composite banner generated." };
 }
 
-/* ---------------- Build helpers ---------------- */
+/* ---------- Build helpers ---------- */
 
 function buildBackground(bg, opts) {
   if (!bg || bg.kind === "transparent") return "";
@@ -517,7 +483,7 @@ function buildShadow(sh) {
   return `box-shadow:${layers};`;
 }
 
-/* ---------------- Utils ---------------- */
+/* ---------- Utilities ---------- */
 
 function ensureBaseFontAndResets(css, scope) {
   const rootRe = new RegExp(`${escapeReg(scope)}\\s*\\{[\\s\\S]*?\\}`, "i");
@@ -545,8 +511,8 @@ function enforceScope(inputCss = "", scope = ".comp") {
 
 function autofixCss(css = "") {
   let out = cssOnly(css);
-  out = out.replace(/,\s*(;|\})/g, "$1");           // trailing commas
-  out = out.replace(/([^;\{\}\s])\s*\}/g, "$1; }"); // missing semis
+  out = out.replace(/,\s*(;|\})/g, "$1");
+  out = out.replace(/([^;\{\}\s])\s*\}/g, "$1; }`);
   const open = (out.match(/\{/g) || []).length;
   const close = (out.match(/\}/g) || []).length;
   if (open > close) out += "}".repeat(open - close);
@@ -554,7 +520,6 @@ function autofixCss(css = "") {
 }
 
 function prettyCss(css) {
-  // very light formatter: newlines between rules
   return css
     .replace(/\}\s*/g, "}\n")
     .replace(/\{\s*/g, "{\n  ")
@@ -623,7 +588,7 @@ function findChildText(arr, kind) {
   return it?.text || "";
 }
 
-/* Tiny helpers */
+/* tiny helpers */
 function n(v){ const x = Number(v); return Number.isFinite(x) ? x : 0; }
 function px(v){ return `${Math.max(0, Math.round(Number(v)||0))}px`; }
 function colorOr(c){ return (typeof c === "string" && c.trim()) ? c.trim() : ""; }
