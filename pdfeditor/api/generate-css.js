@@ -1,15 +1,16 @@
 // /api/generate-css.js
-// Component-scoped CSS generator with critique→fix loops, robust GPT-5/4o support,
-// empty-output recovery (vision fallback + text-only), CSS autofix,
-// and a final pass that returns a WORKING HTML snippet for the styles.
-// HTML generation now uses the IMAGE (so button text like "Subscribe" is preserved)
-// and post-fills any elements implied by CSS (e.g., generic ".comp input { ... }").
+// Component-scoped CSS generator with critique→fix loops and robust HTML builder.
+// Improvements:
+// - Vision “hints” now extracts segmented-control tokens from the image (labels, dropdowns, link-like items, dot icon).
+// - HTML generator renders a single-pill .chip with inline .seg items, .divider bars, optional .dot,
+//   and adds caret markers when segments look like dropdowns.
+// - Still returns plain CSS (scoped), but HTML now better reflects segmented controls.
 //
 // ENV:
 //   OPENAI_API_KEY (required)
 //   OPENAI_MODEL   (optional) one of: gpt-5, gpt-5-mini, gpt-4o, gpt-4o-mini
 //
-// Response:
+// Response JSON:
 //   { draft, css, html, versions, passes, palette, notes, scope, component, used_model }
 
 import OpenAI from "openai";
@@ -25,8 +26,7 @@ const MODEL_CHAIN = [
 
 const DEFAULT_MODEL = MODEL_CHAIN[0] || "gpt-4o-mini";
 
-/* Heuristic: models that reliably support image_url in Chat Completions */
-function supportsVision(model) { return /gpt-4o(-mini)?$/i.test(model); }
+function supportsVision(model) { return /gpt-4o(?:-mini)?$/i.test(model); }
 function isGpt5(m){ return /^gpt-5(\b|-)/i.test(m); }
 
 /* ---------------- HTTP handler ---------------- */
@@ -67,10 +67,9 @@ export default async function handler(req, res) {
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const { resolveModel, callOnce } = makeOpenAI(client);
 
-    // Resolve a usable base model (text). Vision may still be switched per call.
     const baseModel = await resolveModel();
 
-    // ---------- DRAFT (with robust fallbacks) ----------
+    // ---------- DRAFT ----------
     let draft = await safeDraft({ baseModel, image, palette, scope, component, callOnce });
     draft = enforceScope(draft, scope);
 
@@ -83,11 +82,9 @@ export default async function handler(req, res) {
       lastCritique = await safeCritique({
         baseModel, image, css, palette, scope, component, cycle: i, total: cycles, callOnce
       });
-
       let fixed = await safeFix({
         baseModel, image, css, critique: lastCritique, palette, scope, component, cycle: i, total: cycles, callOnce
       });
-
       fixed = enforceScope(fixed, scope);
       css = fixed;
       versions.push(css);
@@ -96,24 +93,23 @@ export default async function handler(req, res) {
     // ---------- POST ----------
     css = cssOnly(css);
     css = autofixCss(css);
-    if (!css.trim()) {
-      return sendError(res, 502, "Model returned no CSS", "Empty completion after retries.");
-    }
+    if (!css.trim()) return sendError(res, 502, "Model returned no CSS", "Empty completion after retries.");
 
     if (force_solid) css = flattenGradients(css, solid_color);
     if (minify) css = minifyCss(css);
 
-    // ---------- HINTS (image OCR for labels/placeholders) ----------
-    const hints = await extractHints({ baseModel, image, css, scope, component, callOnce });
+    // ---------- VISION HINTS (extract visible strings + segmented tokens) ----------
+    const hints = await extractHints({ baseModel, image, scope, component, callOnce });
 
-    // ---------- HTML SNIPPET (vision + CSS-coverage) ----------
+    // ---------- HTML (vision + CSS-coverage + segmented control support) ----------
     let html = await suggestHtml({ baseModel, image, css, scope, component, hints, callOnce });
     if (!html || !html.trim()) {
-      html = buildHtmlFromCss(css, scope) || ensureScopedHtml(`<div>${fallbackInner(component)}</div>`, scope);
+      // Build from hints (segmented control) if possible, else fallback from CSS
+      html = buildHtmlFromHints(hints, scope) || buildHtmlFromCss(css, scope) || ensureScopedHtml(`<div>${fallbackInner(component)}</div>`, scope);
     }
     html = ensureScopedHtml(htmlOnly(html), scope);
-    html = ensureHtmlCoversCss(html, css, hints, scope);        // ensure input/button presence
-    html = applyTextHints(html, hints);                         // e.g., button "Subscribe"
+    html = ensureHtmlCoversCss(html, css, hints, scope); // make sure input/button exist if styled
+    html = applyTextHints(html, hints);                  // inject “Subscribe”, placeholders, etc.
 
     const payload = {
       draft,
@@ -141,14 +137,13 @@ export default async function handler(req, res) {
 
 function buildChatParams({ model, messages, kind }) {
   const base = { model, messages };
-  const BUDGET = { draft: 1200, critique: 700, fix: 1400, html: 600, hints: 300 };
+  const BUDGET = { draft: 1400, critique: 800, fix: 1600, html: 800, hints: 380 };
   const max = BUDGET[kind] || 900;
 
   if (isGpt5(model)) {
-    base.max_completion_tokens = max;   // GPT-5 uses this
-    // temperature omitted (some GPT-5 configs accept only default)
+    base.max_completion_tokens = max;     // GPT-5 family
   } else {
-    base.max_tokens = max;              // 4o / 4o-mini
+    base.max_tokens = max;                // 4o / 4o-mini
     base.temperature = kind === "critique" ? 0.0 : (kind === "draft" ? 0.2 : 0.1);
   }
   return base;
@@ -163,7 +158,7 @@ function makeOpenAI(client) {
         lastErr = e;
         const msg = String(e?.message || "");
         const soft = e?.status === 404 || /does not exist|unknown model|restricted/i.test(msg);
-        if (!soft) throw e; // hard error; stop
+        if (!soft) throw e;
       }
     }
     throw lastErr || new Error("No usable model found");
@@ -171,7 +166,6 @@ function makeOpenAI(client) {
 
   const resolveModel = async () => {
     const { model } = await tryEachModel(async (m) => {
-      // tiny text ping; if this fails, model is unusable
       await client.chat.completions.create({
         model: m,
         messages: [{ role: "user", content: "ping" }],
@@ -182,12 +176,9 @@ function makeOpenAI(client) {
   };
 
   const callOnce = async (kind, args) => {
-    // If this step uses the image, force a vision-capable model when needed.
     let modelForThisCall = args.model;
     const usingImage = !!args.image && !args.no_image;
-    if (usingImage && !supportsVision(modelForThisCall)) {
-      modelForThisCall = "gpt-4o"; // vision fallback
-    }
+    if (usingImage && !supportsVision(modelForThisCall)) modelForThisCall = "gpt-4o";
 
     const sys = {
       draft:
@@ -195,135 +186,114 @@ function makeOpenAI(client) {
         "You are styling ONE UI COMPONENT (not a full page). " +
         "All selectors MUST be scoped under the provided SCOPE CLASS. " +
         "Do NOT target html/body/universal selectors or add resets/normalizers. " +
-        "If gradients are visible, use linear-gradient; if not, prefer a solid background-color. " +
-        "Return CSS ONLY.",
+        "If the screenshot shows a SEGMENTED PILL/CHIP (one rounded container with multiple inline items separated by thin dividers), " +
+        "write rules for the container (e.g., `.chip`), segment items (e.g., `.seg`), divider lines (`.divider`), " +
+        "and small dot/chevron decorations when present. " +
+        "If no gradient is visible, prefer a solid background-color. Return CSS ONLY.",
       critique:
-        "You are a strict component QA assistant. Do NOT output CSS. " +
-        "Compare the screenshot WITH the CURRENT component CSS. " +
-        "Identify concrete mismatches (alignment, spacing, radius, borders, colors, size, typography, shadows/gradients). " +
-        "Ensure selectors remain under the provided scope. Be terse.",
+        "You are a strict component QA assistant. Do NOT output CSS. Compare screenshot vs CURRENT CSS. " +
+        "Call out mismatches in: container shape (single rounded pill), inline segment spacing, divider visibility, dot/chevron, " +
+        "font size/weight, colors, borders, radius, shadows, and whether items are links or buttons. Be terse.",
       fix:
-        "Return CSS only (no HTML/Markdown). Overwrite the stylesheet to resolve the critique " +
-        "and better match the screenshot of the SINGLE COMPONENT. " +
-        "All selectors must remain under the provided scope. No global resets.",
+        "Return CSS only (no HTML/Markdown). Overwrite the stylesheet to resolve the critique and better match the screenshot. " +
+        "Keep all selectors under the scope. Include container `.chip`, `.seg`, `.divider`, `.dot`, caret pseudo-elements if needed.",
       html:
-        "Return HTML ONLY (no Markdown, no code fences). Produce a minimal DOM snippet that DEMONSTRATES the styles " +
-        "defined by the provided CSS. The ROOT must be a single element using the provided SCOPE CLASS (e.g., <div class=\".comp\">). " +
-        "Use reasonable placeholder text/values. Prefer semantic elements (button, input, label, a, img) as indicated by selectors. " +
-        "Infer visible button text (e.g., 'Subscribe') and input placeholder from the screenshot when present.",
+        "Return HTML ONLY (no code fences). Build a minimal DOM that demonstrates the CSS. " +
+        "If the screenshot shows a segmented pill, render a single `.chip` container with inline `.seg` items separated by `.divider` spans. " +
+        "Include a small `.dot` element before 'Compare' if visible and a caret (▼) for dropdown-like items. " +
+        "Use the provided HINTS to set button/link text and placeholders.",
       hints:
-        "Return JSON ONLY. Extract UI strings from the screenshot of a SINGLE component: " +
-        "{ \"has_input\": boolean, \"input_type\": \"text|email|search|password|other|unknown\", " +
-        "\"input_placeholder\": string, \"has_button\": boolean, \"button_text\": string }. " +
-        "Keep strings short; if not visible, use empty string. No extra fields."
+        "Return JSON ONLY that describes visible UI tokens for a SINGLE component. " +
+        "{ \"segments\": [ {\"text\": string, \"role\": \"label|dropdown|link|toggle|value|unknown\", \"caret\": boolean, \"dot\": boolean } , ... ], " +
+        "\"has_input\": boolean, \"input_type\": \"text|email|search|password|other|unknown\", \"input_placeholder\": string, " +
+        "\"has_button\": boolean, \"button_text\": string }. " +
+        "If there is a segmented pill, fill `segments` in visual order using concise text (e.g., 'Date range', 'Last 7 days', 'Daily', 'Compare', 'Previous period')."
     }[kind];
 
-    // Build messages (image + text OR text-only)
+    // messages
     const baseLines = [
       `SCOPE CLASS: ${args.scope}`,
       `COMPONENT TYPE (hint): ${args.component}`
     ];
 
     let messages;
-
     if (kind === "draft") {
       const usr = [
         ...baseLines,
         usingImage
-          ? "Task: study the screenshot region and produce CSS for ONLY that component."
-          : "No screenshot available. Produce reasonable CSS for the component using the hint and palette.",
-        "- Prefix selectors with the scope (or use the scope as root).",
-        "- No page layout or resets.",
+          ? "Study the screenshot and produce CSS for ONLY that component."
+          : "No screenshot available; produce reasonable CSS for the component using the hint/palette.",
+        "- Prefix selectors with the scope or use the scope as root.",
+        "- No resets or page layout.",
         args.palette?.length ? `Optional palette tokens: ${args.palette.join(", ")}` : "Palette: optional.",
         "Return CSS ONLY."
       ].join("\n");
-
       messages = usingImage
-        ? [
-            { role: "system", content: sys },
-            { role: "user", content: [{ type: "text", text: usr }, { type: "image_url", image_url: { url: args.image, detail: "high" } }] }
-          ]
-        : [
-            { role: "system", content: sys },
-            { role: "user", content: [{ type: "text", text: usr }] }
-          ];
-
-    } else if (kind === "critique") {
+        ? [{ role: "system", content: sys }, { role: "user", content: [{ type: "text", text: usr }, { type: "image_url", image_url: { url: args.image, detail: "high" } }] }]
+        : [{ role: "system", content: sys }, { role: "user", content: [{ type: "text", text: usr }] }];
+    }
+    else if (kind === "critique") {
       const usr = [
         ...baseLines,
-        `Critique ${args.cycle}/${args.total}. List actionable corrections with target selectors where possible.`,
+        `Critique ${args.cycle}/${args.total}.`,
         "", "CURRENT CSS:", "```css", args.css, "```",
         args.palette?.length ? `Palette hint: ${args.palette.join(", ")}` : ""
       ].join("\n");
-
       messages = usingImage
-        ? [
-            { role: "system", content: sys },
-            { role: "user", content: [{ type: "text", text: usr }, { type: "image_url", image_url: { url: args.image, detail: "high" } }] }
-          ]
-        : [
-            { role: "system", content: sys },
-            { role: "user", content: [{ type: "text", text: usr }] }
-          ];
-
-    } else if (kind === "fix") {
+        ? [{ role: "system", content: sys }, { role: "user", content: [{ type: "text", text: usr }, { type: "image_url", image_url: { url: args.image, detail: "high" } }] }]
+        : [{ role: "system", content: sys }, { role: "user", content: [{ type: "text", text: usr }] }];
+    }
+    else if (kind === "fix") {
       const usr = [
         ...baseLines,
-        `Fix ${args.cycle}/${args.total} for the component.`,
+        `Fix ${args.cycle}/${args.total}.`,
         "Rules:",
         "- Keep all selectors under the scope.",
-        "- No body/html/universal selectors.",
-        "- Adjust borders, radius, colors, gradients, typography, and shadows to match the screenshot.",
+        "- Include container/segments/dividers if screenshot shows a segmented pill.",
         "", "CRITIQUE:", args.critique || "(none)",
         "", "CURRENT CSS:", "```css", args.css, "```",
-        args.palette?.length ? `Palette hint (optional): ${args.palette.join(", ")}` : ""
+        args.palette?.length ? `Palette hint: ${args.palette.join(", ")}` : ""
       ].join("\n");
-
       messages = usingImage
-        ? [
-            { role: "system", content: sys },
-            { role: "user", content: [{ type: "text", text: usr }, { type: "image_url", image_url: { url: args.image, detail: "high" } }] }
-          ]
-        : [
-            { role: "system", content: sys },
-            { role: "user", content: [{ type: "text", text: usr }] }
-          ];
-
-    } else if (kind === "html") {
+        ? [{ role: "system", content: sys }, { role: "user", content: [{ type: "text", text: usr }, { type: "image_url", image_url: { url: args.image, detail: "high" } }] }]
+        : [{ role: "system", content: sys }, { role: "user", content: [{ type: "text", text: usr }] }];
+    }
+    else if (kind === "html") {
       const usr = [
         ...baseLines,
-        "Generate the minimal HTML snippet that will pick up ALL styles in the CSS. " +
-        "ROOT must be a single element that uses the scope class. " +
-        "Include every element type the CSS targets (e.g., input + button), " +
-        "and prefer using the exact visible text from the screenshot for primary CTAs.",
+        "Generate minimal HTML that picks up ALL styles in the CSS. Root must use the scope class.",
+        "If you detect a segmented pill, use:",
+        "  <div class=\"chip\">",
+        "    <span class=\"seg label\">Date range</span><span class=\"divider\"></span>",
+        "    <button class=\"seg value has-caret\">Last 7 days</button><span class=\"divider\"></span>",
+        "    <button class=\"seg value has-caret\">Daily</button>",
+        "  </div>",
+        "  <div class=\"chip\">",
+        "    <span class=\"seg dot\" aria-hidden=\"true\"></span>",
+        "    <button class=\"seg value\">Compare</button><span class=\"divider\"></span>",
+        "    <a class=\"seg link has-caret\" href=\"#\">Previous period</a>",
+        "  </div>",
+        "Use HINTS below to select exact text.",
         "", "CSS:", "```css", args.css, "```",
         args.hints ? `\nHINTS JSON: ${JSON.stringify(args.hints)}` : ""
       ].join("\n");
-
       messages = [
         { role: "system", content: sys },
-        { role: "user",
-          content: [
-            { type: "text", text: usr },
-            ...(args.image && !args.no_image ? [{ type: "image_url", image_url: { url: args.image, detail: "high" } }] : [])
-          ]
-        }
+        { role: "user", content: [{ type: "text", text: usr }, ...(args.image && !args.no_image ? [{ type: "image_url", image_url: { url: args.image, detail: "high" } }] : [])] }
       ];
-
-    } else if (kind === "hints") {
+    }
+    else if (kind === "hints") {
       const usr = [
         ...baseLines,
-        "Extract labels from this screenshot.",
+        "Extract UI strings/tokens from this screenshot.",
         "Return JSON ONLY as specified. No code fences."
       ].join("\n");
-
       messages = [
         { role: "system", content: sys },
         { role: "user", content: [{ type: "text", text: usr }, { type: "image_url", image_url: { url: args.image, detail: "high" } }] }
       ];
-    } else {
-      throw new Error(`Unknown kind: ${kind}`);
     }
+    else throw new Error(`Unknown kind: ${kind}`);
 
     const params = buildChatParams({ model: modelForThisCall, messages, kind });
     const r = await client.chat.completions.create(params);
@@ -341,47 +311,33 @@ function makeOpenAI(client) {
 /* ---------------- Recovery wrappers ---------------- */
 
 async function safeDraft({ baseModel, image, palette, scope, component, callOnce }) {
-  // 1) try with chosen model (auto-vision fallback inside callOnce)
   let out = await callOnce("draft", { model: baseModel, image, palette, scope, component });
   if (out && out.trim()) return out;
-
-  // 2) retry once
   out = await callOnce("draft", { model: baseModel, image, palette, scope, component });
   if (out && out.trim()) return out;
-
-  // 3) explicit vision fallbacks
   for (const m of ["gpt-4o", "gpt-4o-mini"]) {
-    try {
-      out = await callOnce("draft", { model: m, image, palette, scope, component });
-      if (out && out.trim()) return out;
-    } catch {}
+    try { out = await callOnce("draft", { model: m, image, palette, scope, component }); if (out && out.trim()) return out; } catch {}
   }
-
-  // 4) text-only fallback (no image block)
-  try {
-    out = await callOnce("draft", { model: "gpt-4o-mini", no_image: true, image: null, palette, scope, component });
-    if (out && out.trim()) return out;
-  } catch {}
-
+  try { out = await callOnce("draft", { model: "gpt-4o-mini", no_image: true, image: null, palette, scope, component }); if (out && out.trim()) return out; } catch {}
   return "";
 }
 
-async function safeCritique(args) {
-  try { return await args.callOnce("critique", args); }
-  catch { return ""; }
-}
+async function safeCritique(args) { try { return await args.callOnce("critique", args); } catch { return ""; } }
+async function safeFix(args) { try { return await args.callOnce("fix", args); } catch { return args.css || ""; } }
 
-async function safeFix(args) {
-  try { return await args.callOnce("fix", args); }
-  catch { return args.css || ""; }
-}
-
-/* Extract button label / placeholder via vision */
-async function extractHints({ baseModel, image, css, scope, component, callOnce }) {
+/* Extract tokens/labels from the screenshot */
+async function extractHints({ baseModel, image, scope, component, callOnce }) {
   try {
     const json = await callOnce("hints", { model: baseModel, image, scope, component });
-    // Validate shape
+    // normalize
+    const segments = Array.isArray(json?.segments) ? json.segments.map(s => ({
+      text: String(s?.text || "").trim(),
+      role: String(s?.role || "unknown").toLowerCase(),
+      caret: !!s?.caret,
+      dot: !!s?.dot
+    })).filter(s => s.text) : [];
     return {
+      segments,
       has_input: !!json?.has_input,
       input_type: String(json?.input_type || "").toLowerCase(),
       input_placeholder: typeof json?.input_placeholder === "string" ? json.input_placeholder : "",
@@ -389,7 +345,7 @@ async function extractHints({ baseModel, image, css, scope, component, callOnce 
       button_text: typeof json?.button_text === "string" ? json.button_text : ""
     };
   } catch {
-    return { has_input: false, input_type: "", input_placeholder: "", has_button: false, button_text: "" };
+    return { segments: [], has_input: false, input_type: "", input_placeholder: "", has_button: false, button_text: "" };
   }
 }
 
@@ -416,18 +372,9 @@ function extractErrMsg(err) {
   return String(err);
 }
 
-function cssOnly(text = "") {
-  return String(text).replace(/^```(?:css)?\s*/i, "").replace(/```$/i, "").trim();
-}
-function textOnly(s = "") {
-  return String(s).replace(/```[\s\S]*?```/g, "").trim();
-}
-function htmlOnly(s = "") {
-  return String(s)
-    .replace(/^```(?:html)?\s*/i, "")
-    .replace(/```$/i, "")
-    .trim();
-}
+function cssOnly(text = "") { return String(text).replace(/^```(?:css)?\s*/i, "").replace(/```$/i, "").trim(); }
+function textOnly(s = "") { return String(s).replace(/```[\s\S]*?```/g, "").trim(); }
+function htmlOnly(s = "") { return String(s).replace(/^```(?:html)?\s*/i, "").replace(/```$/i, "").trim(); }
 function jsonOnly(s = "") {
   const raw = String(s || "");
   try { return JSON.parse(raw); } catch {}
@@ -436,7 +383,7 @@ function jsonOnly(s = "") {
   return {};
 }
 
-/** Prefix non-@, non-:root top-level selectors with scope */
+/** Scope top-level selectors (not @rules or :root) */
 function enforceScope(inputCss = "", scope = ".comp") {
   let css = cssOnly(inputCss);
   css = css.replace(/(^|})\s*([^@}{]+?)\s*\{/g, (m, p1, selectors) => {
@@ -453,17 +400,16 @@ function enforceScope(inputCss = "", scope = ".comp") {
 /** Heuristic CSS repair */
 function autofixCss(css = "") {
   let out = cssOnly(css);
-  out = out.replace(/\/\*+\s*START_CSS\s*\*+\//gi, "");  // strip markers
-  out = out.replace(/,\s*(;|\})/g, "$1");                // fix dangling commas
-  // remove zero-alpha shadow layers
+  out = out.replace(/\/\*+\s*START_CSS\s*\*+\//gi, "");
+  out = out.replace(/,\s*(;|\})/g, "$1"); // trailing commas
   out = out.replace(/(box-shadow\s*:\s*)([^;]+);/gi, (m, p, val) => {
     const cleaned = val.split(/\s*,\s*/).filter(layer => !/rgba?\([^)]*,\s*0(?:\.0+)?\)/i.test(layer)).join(", ");
     return `${p}${cleaned};`;
   });
-  out = out.replace(/([^;\{\}\s])\s*\}/g, "$1; }");      // ensure semicolons
+  out = out.replace(/([^;\{\}\s])\s*\}/g, "$1; }");
   const open = (out.match(/\{/g) || []).length;
   const close = (out.match(/\}/g) || []).length;
-  if (open > close) out += "}".repeat(open - close);     // balance braces
+  if (open > close) out += "}".repeat(open - close);
   return out.trim();
 }
 
@@ -482,7 +428,7 @@ function minifyCss(css = "") {
     .trim();
 }
 
-/* Build a reasonable HTML snippet from selectors */
+/* Build HTML purely from CSS when hints are missing */
 function buildHtmlFromCss(css, scope) {
   const className = getScopeClass(scope);
   const need = {
@@ -499,8 +445,8 @@ function buildHtmlFromCss(css, scope) {
   };
 
   const parts = [];
-  if (need.label) parts.push(`<label for="field">Label</label>`);
-  if (need.inputText || need.inputGeneric) parts.push(`<input id="field" type="text" placeholder="Enter text">`);
+  if (need.label) parts.push(`<span class="seg label">Label</span>`);
+  if (need.inputText || need.inputGeneric) parts.push(`<input type="text" placeholder="Enter text">`);
   if (need.inputEmail) parts.push(`<input type="email" placeholder="name@example.com">`);
   if (need.inputSearch) parts.push(`<input type="search" placeholder="Search">`);
   if (need.textarea) parts.push(`<textarea rows="3" placeholder="Type here"></textarea>`);
@@ -513,7 +459,43 @@ function buildHtmlFromCss(css, scope) {
   return `<div class="${className}">\n  ${parts.join("\n  ")}\n</div>`;
 }
 
-/* Ask model for an HTML snippet, with image & hints */
+/* Build HTML using segmented-control hints when available */
+function buildHtmlFromHints(hints, scope) {
+  const className = getScopeClass(scope);
+  const segs = Array.isArray(hints?.segments) ? hints.segments.filter(s => s.text) : [];
+  if (!segs.length) return "";
+
+  // Split into two chips if we detect a "compare" style token later in the list
+  let splitIdx = segs.findIndex(s => /compare/i.test(s.text));
+  if (splitIdx < 0) splitIdx = Number.MAX_SAFE_INTEGER;
+
+  const groups = [segs.slice(0, splitIdx), segs.slice(splitIdx)].filter(g => g.length);
+
+  const htmlGroups = groups.map(group => {
+    const parts = [];
+    group.forEach((s, i) => {
+      // divider between items
+      if (i > 0) parts.push(`<span class="divider"></span>`);
+      const caretClass = s.caret ? " has-caret" : "";
+      const safe = escapeHtml(s.text);
+      if (s.role === "label") {
+        parts.push(`<span class="seg label">${safe}</span>`);
+      } else if (s.role === "link") {
+        parts.push(`<a class="seg link${caretClass}" href="#">${safe}</a>`);
+      } else if (s.role === "toggle" || s.role === "value" || s.role === "dropdown" || s.role === "unknown") {
+        // Optional dot before “Compare”
+        const dot = s.dot ? `<span class="seg dot" aria-hidden="true"></span>` : "";
+        parts.push(`${dot}<button class="seg value${caretClass}">${safe}</button>`);
+      } else {
+        parts.push(`<span class="seg">${safe}</span>`);
+      }
+    });
+    return `<div class="chip">\n  ${parts.join("\n  ")}\n</div>`;
+  });
+
+  return `<div class="${className}">\n${htmlGroups.join("\n")}\n</div>`;
+}
+
 async function suggestHtml({ baseModel, image, css, scope, component, hints, callOnce }) {
   try {
     const html = await callOnce("html", { model: baseModel, image, css, scope, component, hints });
@@ -527,11 +509,10 @@ function ensureScopedHtml(html, scope) {
   const className = getScopeClass(scope);
   const rootRe = new RegExp(`<([a-z0-9-]+)([^>]*class=["'][^"']*${escapeReg(className)}[^"']*["'][^>]*)>`, "i");
   if (rootRe.test(html)) return html.trim();
-  // wrap
   return `<div class="${className}">\n${html.trim()}\n</div>`;
 }
 
-/* If CSS references inputs/buttons but HTML lacks them, inject reasonable defaults */
+/* Ensure HTML contains elements that CSS styles (fallback safety) */
 function ensureHtmlCoversCss(html, css, hints, scope) {
   let out = html.trim();
   const hasInputCSS = /(^|[^\w-])input(\b|[\s\[#.:>{,])/i.test(css);
@@ -548,7 +529,6 @@ function ensureHtmlCoversCss(html, css, hints, scope) {
   return out;
 }
 
-/* Replace generic button/placeholder text with vision-derived strings */
 function applyTextHints(html, hints) {
   if (!hints) return html;
   let out = html;
