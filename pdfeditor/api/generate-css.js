@@ -1,342 +1,578 @@
-// /pages/api/generate-css.js
-// Image → CSS (literal, pill-aware). Returns { css, html, facts, used_model }.
-// IMPORTANT: disable Next body parser; we read the stream ourselves.
-export const config = { api: { bodyParser: false } };
+// /api/generate-css.js
+// Component-scoped CSS generator with critique→fix loops, robust GPT-5/4o support,
+// empty-output recovery (vision fallback + text-only), CSS autofix,
+// and a final pass that returns a WORKING HTML snippet for the styles.
+// HTML generation now uses the IMAGE (so button text like "Subscribe" is preserved)
+// and post-fills any elements implied by CSS (e.g., generic ".comp input { ... }").
+//
+// ENV:
+//   OPENAI_API_KEY (required)
+//   OPENAI_MODEL   (optional) one of: gpt-5, gpt-5-mini, gpt-4o, gpt-4o-mini
+//
+// Response:
+//   { draft, css, html, versions, passes, palette, notes, scope, component, used_model }
 
 import OpenAI from "openai";
 
-/* ---------------- Model selection ---------------- */
+/* ---------------- Models ---------------- */
 const MODEL_CHAIN = [
-  process.env.OPENAI_MODEL,   // optional override: "gpt-5", "gpt-5-mini"
+  process.env.OPENAI_MODEL, // optional override
   "gpt-5",
   "gpt-5-mini",
   "gpt-4o",
-  "gpt-4o-mini",
+  "gpt-4o-mini"
 ].filter(Boolean);
 
-const isGpt5 = (m) => /^gpt-5(\b|-)/i.test(m || "");
-const is4o   = (m) => /^gpt-4o(-mini)?$/i.test(m || "");
-const canSee = is4o; // multimodal image parts via chat.completions
+const DEFAULT_MODEL = MODEL_CHAIN[0] || "gpt-4o-mini";
+
+/* Heuristic: models that reliably support image_url in Chat Completions */
+function supportsVision(model) { return /gpt-4o(-mini)?$/i.test(model); }
+function isGpt5(m){ return /^gpt-5(\b|-)/i.test(m); }
 
 /* ---------------- HTTP handler ---------------- */
 export default async function handler(req, res) {
   try {
     if (req.method !== "POST") {
       res.setHeader("Allow", "POST");
-      return res.status(405).json({ error: "Method not allowed" });
+      return res.status(405).json({ error: "Method not allowed", details: "Use POST /api/generate-css" });
+    }
+
+    let raw = "";
+    for await (const chunk of req) raw += chunk;
+
+    let body = {};
+    try { body = raw ? JSON.parse(raw) : {}; }
+    catch (e) { return sendError(res, 400, "Bad JSON", e?.message, "Send Content-Type: application/json"); }
+
+    const {
+      image,
+      palette = [],
+      double_checks = 1,            // 1–8
+      scope = ".comp",
+      component = "component",
+      force_solid = false,          // optional: replace gradients with solid
+      solid_color = "",             // optional solid color
+      minify = false,               // optional minify result
+      debug = false
+    } = body;
+
+    if (!image || typeof image !== "string" || !/^data:image\//i.test(image)) {
+      return sendError(res, 400, "Invalid 'image'", "Expected data URL: data:image/*;base64,...");
     }
     if (!process.env.OPENAI_API_KEY) {
       return sendError(res, 500, "OPENAI_API_KEY not configured");
     }
 
-    // Read raw JSON
-    let raw = "";
-    try { for await (const chunk of req) raw += chunk; }
-    catch (e) { return sendError(res, 400, "Failed to read request body", e?.message); }
-
-    let body = {};
-    try { body = raw ? JSON.parse(raw) : {}; }
-    catch (e) { return sendError(res, 400, "Bad JSON", e?.message); }
-
-    const { image, scope = ".comp", component = "component" } = body || {};
-
-    if (!image || typeof image !== "string" || !/^data:image\//i.test(image)) {
-      return sendError(res, 400, "Send { image: dataUrl, scope?, component? }");
-    }
-    if (image.length > 16_000_000) {
-      return sendError(res, 413, "Image too large; please crop smaller.");
-    }
-
+    const cycles = clampInt(double_checks, 1, 8);
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-    const { resolveModel, callOnce } = wrapOpenAI(client);
-    const model = await resolveModel();
+    const { resolveModel, callOnce } = makeOpenAI(client);
 
-    // 1) Extract literal facts from screenshot (vision JSON)
-    const facts = await passFacts({ model, image, scope, component, callOnce });
+    // Resolve a usable base model (text). Vision may still be switched per call.
+    const baseModel = await resolveModel();
 
-    // 2) Build CSS literally from facts (no invention)
-    let css = await passCssFromFacts({ model, image, scope, component, facts, callOnce });
+    // ---------- DRAFT (with robust fallbacks) ----------
+    let draft = await safeDraft({ baseModel, image, palette, scope, component, callOnce });
+    draft = enforceScope(draft, scope);
 
-    // 2b) Strict repair if empty
-    if (!css || !css.trim()) {
-      css = await passCssRepair({ model, image, scope, component, facts, callOnce });
+    let css = draft;
+    const versions = [draft];
+    let lastCritique = "";
+
+    // ---------- CRITIQUE→FIX ----------
+    for (let i = 1; i <= cycles; i++) {
+      lastCritique = await safeCritique({
+        baseModel, image, css, palette, scope, component, cycle: i, total: cycles, callOnce
+      });
+
+      let fixed = await safeFix({
+        baseModel, image, css, critique: lastCritique, palette, scope, component, cycle: i, total: cycles, callOnce
+      });
+
+      fixed = enforceScope(fixed, scope);
+      css = fixed;
+      versions.push(css);
     }
-    // 2c) Last-ditch on 4o-mini if needed
-    if (!css || !css.trim()) {
-      css = await passCssFromFacts({ model: "gpt-4o-mini", image, scope, component, facts, callOnce });
-    }
 
-    // 3) Scope + final grammar repairs (no trailing commas / missing semicolons)
-    css = enforceScope(css, scope);
+    // ---------- POST ----------
+    css = cssOnly(css);
     css = autofixCss(css);
-
     if (!css.trim()) {
-      return sendError(res, 502, "Model returned no CSS", "Empty after repairs");
+      return sendError(res, 502, "Model returned no CSS", "Empty completion after retries.");
     }
 
-    // 4) Return an HTML stub that matches the visible elements & text
-    const html = suggestHtml(css, scope, facts);
+    if (force_solid) css = flattenGradients(css, solid_color);
+    if (minify) css = minifyCss(css);
+
+    // ---------- HINTS (image OCR for labels/placeholders) ----------
+    const hints = await extractHints({ baseModel, image, css, scope, component, callOnce });
+
+    // ---------- HTML SNIPPET (vision + CSS-coverage) ----------
+    let html = await suggestHtml({ baseModel, image, css, scope, component, hints, callOnce });
+    if (!html || !html.trim()) {
+      html = buildHtmlFromCss(css, scope) || ensureScopedHtml(`<div>${fallbackInner(component)}</div>`, scope);
+    }
+    html = ensureScopedHtml(htmlOnly(html), scope);
+    html = ensureHtmlCoversCss(html, css, hints, scope);        // ensure input/button presence
+    html = applyTextHints(html, hints);                         // e.g., button "Subscribe"
+
+    const payload = {
+      draft,
+      css,
+      html,
+      versions,
+      passes: 1 + cycles * 2,
+      palette,
+      notes: lastCritique,
+      scope,
+      component,
+      used_model: baseModel,
+      ...(debug ? { debug: { model_chain: MODEL_CHAIN, vision_supported: supportsVision(baseModel), hints } } : {})
+    };
 
     res.setHeader("Cache-Control", "no-store");
-    return res.status(200).json({ css, html, facts, scope, component, used_model: model });
+    return res.status(200).json(payload);
+
   } catch (err) {
-    return sendError(res, 500, "Failed to generate CSS.", extractErr(err));
+    return sendError(res, 500, "Failed to generate CSS.", extractErrMsg(err));
   }
 }
 
-/* ---------------- OpenAI wrappers ---------------- */
-function wrapOpenAI(client) {
-  async function tryEach(run) {
+/* ---------------- OpenAI glue ---------------- */
+
+function buildChatParams({ model, messages, kind }) {
+  const base = { model, messages };
+  const BUDGET = { draft: 1200, critique: 700, fix: 1400, html: 600, hints: 300 };
+  const max = BUDGET[kind] || 900;
+
+  if (isGpt5(model)) {
+    base.max_completion_tokens = max;   // GPT-5 uses this
+    // temperature omitted (some GPT-5 configs accept only default)
+  } else {
+    base.max_tokens = max;              // 4o / 4o-mini
+    base.temperature = kind === "critique" ? 0.0 : (kind === "draft" ? 0.2 : 0.1);
+  }
+  return base;
+}
+
+function makeOpenAI(client) {
+  async function tryEachModel(run) {
     let lastErr;
-    for (const m of (MODEL_CHAIN.length ? MODEL_CHAIN : ["gpt-4o-mini"])) {
-      try { await run(m); return m; }
+    for (const model of (MODEL_CHAIN.length ? MODEL_CHAIN : [DEFAULT_MODEL])) {
+      try { await run(model); return { model }; }
       catch (e) {
         lastErr = e;
         const msg = String(e?.message || "");
-        const soft = e?.status === 404 || /unknown|does not exist|restricted|Unsupported/i.test(msg);
-        if (!soft) throw e;
+        const soft = e?.status === 404 || /does not exist|unknown model|restricted/i.test(msg);
+        if (!soft) throw e; // hard error; stop
       }
     }
-    throw lastErr || new Error("No usable model");
+    throw lastErr || new Error("No usable model found");
   }
-  async function resolveModel() {
-    // tiny probe
-    return tryEach(async (m) => {
-      const probe = { model: m, messages: [{ role: "user", content: "ping" }] };
-      if (isGpt5(m)) probe.max_completion_tokens = 8; else probe.max_tokens = 8;
-      await client.chat.completions.create(probe);
+
+  const resolveModel = async () => {
+    const { model } = await tryEachModel(async (m) => {
+      // tiny text ping; if this fails, model is unusable
+      await client.chat.completions.create({
+        model: m,
+        messages: [{ role: "user", content: "ping" }],
+        ...(isGpt5(m) ? { max_completion_tokens: 16 } : { max_tokens: 16 })
+      });
     });
-  }
-  async function callOnce(kind, { model, messages }) {
-    const budgets = { facts: 900, css: 1600 };
-    const p = { model, messages };
-    if (isGpt5(model)) {
-      p.max_completion_tokens = budgets[kind] || 900; // GPT-5 param
-    } else {
-      p.max_tokens = budgets[kind] || 900;            // 4o/4o-mini param
-      p.temperature = kind === "facts" ? 0 : 0.1;
+    return model;
+  };
+
+  const callOnce = async (kind, args) => {
+    // If this step uses the image, force a vision-capable model when needed.
+    let modelForThisCall = args.model;
+    const usingImage = !!args.image && !args.no_image;
+    if (usingImage && !supportsVision(modelForThisCall)) {
+      modelForThisCall = "gpt-4o"; // vision fallback
     }
-    const r = await client.chat.completions.create(p);
-    return r?.choices?.[0]?.message?.content ?? "";
-  }
+
+    const sys = {
+      draft:
+        "You are a front-end CSS engine. Output VALID vanilla CSS only (no HTML/Markdown). " +
+        "You are styling ONE UI COMPONENT (not a full page). " +
+        "All selectors MUST be scoped under the provided SCOPE CLASS. " +
+        "Do NOT target html/body/universal selectors or add resets/normalizers. " +
+        "If gradients are visible, use linear-gradient; if not, prefer a solid background-color. " +
+        "Return CSS ONLY.",
+      critique:
+        "You are a strict component QA assistant. Do NOT output CSS. " +
+        "Compare the screenshot WITH the CURRENT component CSS. " +
+        "Identify concrete mismatches (alignment, spacing, radius, borders, colors, size, typography, shadows/gradients). " +
+        "Ensure selectors remain under the provided scope. Be terse.",
+      fix:
+        "Return CSS only (no HTML/Markdown). Overwrite the stylesheet to resolve the critique " +
+        "and better match the screenshot of the SINGLE COMPONENT. " +
+        "All selectors must remain under the provided scope. No global resets.",
+      html:
+        "Return HTML ONLY (no Markdown, no code fences). Produce a minimal DOM snippet that DEMONSTRATES the styles " +
+        "defined by the provided CSS. The ROOT must be a single element using the provided SCOPE CLASS (e.g., <div class=\".comp\">). " +
+        "Use reasonable placeholder text/values. Prefer semantic elements (button, input, label, a, img) as indicated by selectors. " +
+        "Infer visible button text (e.g., 'Subscribe') and input placeholder from the screenshot when present.",
+      hints:
+        "Return JSON ONLY. Extract UI strings from the screenshot of a SINGLE component: " +
+        "{ \"has_input\": boolean, \"input_type\": \"text|email|search|password|other|unknown\", " +
+        "\"input_placeholder\": string, \"has_button\": boolean, \"button_text\": string }. " +
+        "Keep strings short; if not visible, use empty string. No extra fields."
+    }[kind];
+
+    // Build messages (image + text OR text-only)
+    const baseLines = [
+      `SCOPE CLASS: ${args.scope}`,
+      `COMPONENT TYPE (hint): ${args.component}`
+    ];
+
+    let messages;
+
+    if (kind === "draft") {
+      const usr = [
+        ...baseLines,
+        usingImage
+          ? "Task: study the screenshot region and produce CSS for ONLY that component."
+          : "No screenshot available. Produce reasonable CSS for the component using the hint and palette.",
+        "- Prefix selectors with the scope (or use the scope as root).",
+        "- No page layout or resets.",
+        args.palette?.length ? `Optional palette tokens: ${args.palette.join(", ")}` : "Palette: optional.",
+        "Return CSS ONLY."
+      ].join("\n");
+
+      messages = usingImage
+        ? [
+            { role: "system", content: sys },
+            { role: "user", content: [{ type: "text", text: usr }, { type: "image_url", image_url: { url: args.image, detail: "high" } }] }
+          ]
+        : [
+            { role: "system", content: sys },
+            { role: "user", content: [{ type: "text", text: usr }] }
+          ];
+
+    } else if (kind === "critique") {
+      const usr = [
+        ...baseLines,
+        `Critique ${args.cycle}/${args.total}. List actionable corrections with target selectors where possible.`,
+        "", "CURRENT CSS:", "```css", args.css, "```",
+        args.palette?.length ? `Palette hint: ${args.palette.join(", ")}` : ""
+      ].join("\n");
+
+      messages = usingImage
+        ? [
+            { role: "system", content: sys },
+            { role: "user", content: [{ type: "text", text: usr }, { type: "image_url", image_url: { url: args.image, detail: "high" } }] }
+          ]
+        : [
+            { role: "system", content: sys },
+            { role: "user", content: [{ type: "text", text: usr }] }
+          ];
+
+    } else if (kind === "fix") {
+      const usr = [
+        ...baseLines,
+        `Fix ${args.cycle}/${args.total} for the component.`,
+        "Rules:",
+        "- Keep all selectors under the scope.",
+        "- No body/html/universal selectors.",
+        "- Adjust borders, radius, colors, gradients, typography, and shadows to match the screenshot.",
+        "", "CRITIQUE:", args.critique || "(none)",
+        "", "CURRENT CSS:", "```css", args.css, "```",
+        args.palette?.length ? `Palette hint (optional): ${args.palette.join(", ")}` : ""
+      ].join("\n");
+
+      messages = usingImage
+        ? [
+            { role: "system", content: sys },
+            { role: "user", content: [{ type: "text", text: usr }, { type: "image_url", image_url: { url: args.image, detail: "high" } }] }
+          ]
+        : [
+            { role: "system", content: sys },
+            { role: "user", content: [{ type: "text", text: usr }] }
+          ];
+
+    } else if (kind === "html") {
+      const usr = [
+        ...baseLines,
+        "Generate the minimal HTML snippet that will pick up ALL styles in the CSS. " +
+        "ROOT must be a single element that uses the scope class. " +
+        "Include every element type the CSS targets (e.g., input + button), " +
+        "and prefer using the exact visible text from the screenshot for primary CTAs.",
+        "", "CSS:", "```css", args.css, "```",
+        args.hints ? `\nHINTS JSON: ${JSON.stringify(args.hints)}` : ""
+      ].join("\n");
+
+      messages = [
+        { role: "system", content: sys },
+        { role: "user",
+          content: [
+            { type: "text", text: usr },
+            ...(args.image && !args.no_image ? [{ type: "image_url", image_url: { url: args.image, detail: "high" } }] : [])
+          ]
+        }
+      ];
+
+    } else if (kind === "hints") {
+      const usr = [
+        ...baseLines,
+        "Extract labels from this screenshot.",
+        "Return JSON ONLY as specified. No code fences."
+      ].join("\n");
+
+      messages = [
+        { role: "system", content: sys },
+        { role: "user", content: [{ type: "text", text: usr }, { type: "image_url", image_url: { url: args.image, detail: "high" } }] }
+      ];
+    } else {
+      throw new Error(`Unknown kind: ${kind}`);
+    }
+
+    const params = buildChatParams({ model: modelForThisCall, messages, kind });
+    const r = await client.chat.completions.create(params);
+
+    if (kind === "critique") return textOnly(r?.choices?.[0]?.message?.content || "");
+    if (kind === "html")     return htmlOnly(r?.choices?.[0]?.message?.content || "");
+    if (kind === "hints")    return jsonOnly(r?.choices?.[0]?.message?.content || "{}");
+    // draft/fix
+    return cssOnly(r?.choices?.[0]?.message?.content || (kind === "fix" ? args.css : ""));
+  };
+
   return { resolveModel, callOnce };
 }
 
-/* ---------------- Passes ---------------- */
-async function passFacts({ model, image, scope, component, callOnce }) {
-  const sys =
-    "Return JSON ONLY (no prose). Report objective, measurable style facts of ONE UI component screenshot. " +
-    "Hex colors only (#RRGGBB). If not visible, leave empty/false. Do NOT invent gradients or shadows.";
+/* ---------------- Recovery wrappers ---------------- */
 
-  // Pill-aware + button text + caret + bg kind
-  const schema = `
-{
-  "bg_kind": "solid" | "gradient" | "transparent",
-  "background_color": string,
-  "has_gradient": boolean,
-  "gradient_direction": "to bottom" | "to right" | "to left" | "to top" | "",
-  "gradient_stops": [ { "pos": number, "color": string } ],
+async function safeDraft({ baseModel, image, palette, scope, component, callOnce }) {
+  // 1) try with chosen model (auto-vision fallback inside callOnce)
+  let out = await callOnce("draft", { model: baseModel, image, palette, scope, component });
+  if (out && out.trim()) return out;
 
-  "border_present": boolean,
-  "border_color": string,
-  "border_width_px": number,
-  "border_radius_px": number,
-  "is_pill": boolean,
-  "pill_radius_px": number,
+  // 2) retry once
+  out = await callOnce("draft", { model: baseModel, image, palette, scope, component });
+  if (out && out.trim()) return out;
 
-  "shadow": { "x_px": number, "y_px": number, "blur_px": number, "spread_px": number, "color": string },
-
-  "text_color": string,
-  "font_size_px": number,
-  "font_weight": number,
-  "font_family": string,
-
-  "padding_x_px": number,
-  "padding_y_px": number,
-  "gap_px": number,
-
-  "caret_visible": boolean,
-  "caret_color": string,
-
-  "link_color": string,
-  "link_underline": boolean,
-
-  "button_text": string,
-  "input_placeholder": string,
-  "has_button": boolean,
-  "has_input": boolean,
-  "has_link": boolean,
-  "has_icon": boolean
-}`.trim();
-
-  const instructions =
-    `SCOPE: ${scope}\nCOMPONENT: ${component}\n` +
-    "Measure literally. If a white chip pill is shown, set is_pill=true, bg_kind='solid', background_color '#FFFFFF', " +
-    "border_present=true and border_color near '#E5E7EB'. Only set gradient if there are ≥2 distinct stops. " +
-    "Round pixel values to integers. Include button_text exactly as rendered.\n\n" + schema;
-
-  const messages = [
-    { role: "system", content: sys },
-    { role: "user", content: [
-        { type: "text", text: instructions },
-        { type: "image_url", image_url: { url: image, detail: "high" } }
-      ] }
-  ];
-
-  const visModel = canSee(model) ? model : "gpt-4o";
-  const raw = await callOnce("facts", { model: visModel, messages });
-  return normalizeFacts(tryParseJson(raw));
-}
-
-async function passCssFromFacts({ model, image, scope, component, facts, callOnce }) {
-  const sys =
-    "Output VALID vanilla CSS only (no HTML/Markdown). Build styles literally from FACTS. " +
-    "All selectors under SCOPE; no resets; no creativity.";
-
-  const instructions =
-    `SCOPE: ${scope}\nCOMPONENT: ${component}\n` +
-    "- If bg_kind === 'gradient': background: linear-gradient(gradient_direction, stops).\n" +
-    "- If bg_kind === 'solid': background-color exactly background_color.\n" +
-    "- If is_pill === true: border-radius: 9999px (or pill_radius_px if larger).\n" +
-    "- Apply border only when border_present (width/color).\n" +
-    "- Apply shadow only if color present.\n" +
-    "- Use text_color, font_size_px, font_weight, font_family if present.\n" +
-    "- Apply paddings and gap (gap belongs on the container, not the button).\n" +
-    "- If caret_visible: add a `.caret` SVG color rule.\n" +
-    "- If link_color present: add scoped anchor rule; underline if link_underline.\n" +
-    "Return CSS ONLY.\n\nFACTS JSON:\n" + JSON.stringify(facts);
-
-  const messages = [
-    { role: "system", content: sys },
-    canSee(model)
-      ? { role: "user", content: [{ type: "text", text: instructions }, { type: "image_url", image_url: { url: image, detail: "high" } }] }
-      : { role: "user", content: instructions }
-  ];
-
-  const raw = await callOnce("css", { model, messages });
-  return cssOnly(raw);
-}
-
-async function passCssRepair({ model, image, scope, component, facts, callOnce }) {
-  const sys = "Return VALID CSS only (no HTML/Markdown). Previous CSS was empty. Build minimal literal CSS from FACTS under SCOPE.";
-  const instructions =
-    `SCOPE: ${scope}\nCOMPONENT: ${component}\n` +
-    "Ensure braces/semicolons. No defaults that could be wrong (e.g., don't set text color if unknown). " +
-    "Return CSS ONLY.\n\nFACTS JSON:\n" + JSON.stringify(facts);
-
-  const messages = [
-    { role: "system", content: sys },
-    canSee(model)
-      ? { role: "user", content: [{ type: "text", text: instructions }, { type: "image_url", image_url: { url: image, detail: "low" } }] }
-      : { role: "user", content: instructions }
-  ];
-
-  const raw = await callOnce("css", { model, messages });
-  return cssOnly(raw);
-}
-
-/* ---------------- HTML synthesis ---------------- */
-function suggestHtml(css, scope, facts) {
-  const cls = scope.replace(/^\./, "");
-  const parts = [];
-
-  if (facts?.has_icon) {
-    parts.push(`<span class="icon" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="8"/></svg></span>`);
-  }
-  if (facts?.has_input) {
-    const ph = facts?.input_placeholder || "Enter text";
-    parts.push(`<input type="text" placeholder="${esc(ph)}">`);
-  }
-  if (facts?.has_button) {
-    const label = facts?.button_text || "Button";
-    parts.push(`<button type="button" aria-haspopup="listbox" aria-expanded="false"><span>${esc(label)}</span>${facts?.caret_visible ? caretSvg(facts?.caret_color) : ""}</button>`);
-  }
-  if (facts?.has_link) {
-    parts.push(`<a href="#">${esc(facts?.button_text || "Link")}</a>`);
-  }
-  if (!parts.length) {
-    parts.push(`<button type="button"><span>${esc(facts?.button_text || "Daily")}</span>${facts?.caret_visible ? caretSvg(facts?.caret_color) : ""}</button>`);
+  // 3) explicit vision fallbacks
+  for (const m of ["gpt-4o", "gpt-4o-mini"]) {
+    try {
+      out = await callOnce("draft", { model: m, image, palette, scope, component });
+      if (out && out.trim()) return out;
+    } catch {}
   }
 
-  return `<div class="${cls}" role="group">\n  ${parts.join("\n  ")}\n</div>`;
-}
-function caretSvg(color) {
-  const stroke = color && /^#/.test(color) ? color : "#6b7280";
-  return ` <svg class="caret" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 9l6 6 6-6" stroke="${esc(stroke)}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  // 4) text-only fallback (no image block)
+  try {
+    out = await callOnce("draft", { model: "gpt-4o-mini", no_image: true, image: null, palette, scope, component });
+    if (out && out.trim()) return out;
+  } catch {}
+
+  return "";
 }
 
-/* ---------------- Utilities ---------------- */
-function cssOnly(s=""){ return String(s).replace(/^```(?:css)?\s*/i, "").replace(/```$/i, "").trim(); }
-function enforceScope(inputCss="", scope=".comp"){
+async function safeCritique(args) {
+  try { return await args.callOnce("critique", args); }
+  catch { return ""; }
+}
+
+async function safeFix(args) {
+  try { return await args.callOnce("fix", args); }
+  catch { return args.css || ""; }
+}
+
+/* Extract button label / placeholder via vision */
+async function extractHints({ baseModel, image, css, scope, component, callOnce }) {
+  try {
+    const json = await callOnce("hints", { model: baseModel, image, scope, component });
+    // Validate shape
+    return {
+      has_input: !!json?.has_input,
+      input_type: String(json?.input_type || "").toLowerCase(),
+      input_placeholder: typeof json?.input_placeholder === "string" ? json.input_placeholder : "",
+      has_button: !!json?.has_button,
+      button_text: typeof json?.button_text === "string" ? json.button_text : ""
+    };
+  } catch {
+    return { has_input: false, input_type: "", input_placeholder: "", has_button: false, button_text: "" };
+  }
+}
+
+/* ---------------- Helpers & post-processing ---------------- */
+
+function clampInt(v, min, max) {
+  const n = Number(v);
+  if (Number.isNaN(n)) return min;
+  return Math.max(min, Math.min(max, Math.floor(n)));
+}
+
+function sendError(res, status, error, details, hint) {
+  const payload = { error: String(error || "Unknown") };
+  if (details) payload.details = String(details);
+  if (hint) payload.hint = String(hint);
+  res.status(status).json(payload);
+}
+function extractErrMsg(err) {
+  if (err?.response?.data) {
+    try { return JSON.stringify(err.response.data); } catch {}
+    return String(err.response.data);
+  }
+  if (err?.message) return err.message;
+  return String(err);
+}
+
+function cssOnly(text = "") {
+  return String(text).replace(/^```(?:css)?\s*/i, "").replace(/```$/i, "").trim();
+}
+function textOnly(s = "") {
+  return String(s).replace(/```[\s\S]*?```/g, "").trim();
+}
+function htmlOnly(s = "") {
+  return String(s)
+    .replace(/^```(?:html)?\s*/i, "")
+    .replace(/```$/i, "")
+    .trim();
+}
+function jsonOnly(s = "") {
+  const raw = String(s || "");
+  try { return JSON.parse(raw); } catch {}
+  const m = raw.match(/\{[\s\S]*\}/);
+  if (m) { try { return JSON.parse(m[0]); } catch {} }
+  return {};
+}
+
+/** Prefix non-@, non-:root top-level selectors with scope */
+function enforceScope(inputCss = "", scope = ".comp") {
   let css = cssOnly(inputCss);
-  css = css.replace(/(^|})\s*([^@}{]+?)\s*\{/g,(m,p1,sel)=>{
-    const scoped = sel.split(",").map(s=>s.trim()).map(x =>
-      (!x || x.startsWith(scope) || x.startsWith(":root")) ? x : `${scope} ${x}`
-    ).join(", ");
+  css = css.replace(/(^|})\s*([^@}{]+?)\s*\{/g, (m, p1, selectors) => {
+    const scoped = selectors
+      .split(",")
+      .map(s => s.trim())
+      .map(sel => (!sel || sel.startsWith(scope) || sel.startsWith(":root")) ? sel : `${scope} ${sel}`)
+      .join(", ");
     return `${p1} ${scoped} {`;
   });
   return css.trim();
 }
-function autofixCss(css=""){
+
+/** Heuristic CSS repair */
+function autofixCss(css = "") {
   let out = cssOnly(css);
-  out = out.replace(/,\s*(;|\})/g,"$1");       // dangling commas
-  out = out.replace(/([^;{}\s])\s*\}/g,"$1; }"); // missing semicolons
-  const open=(out.match(/\{/g)||[]).length, close=(out.match(/\}/g)||[]).length;
-  if(open>close) out += "}".repeat(open-close);
+  out = out.replace(/\/\*+\s*START_CSS\s*\*+\//gi, "");  // strip markers
+  out = out.replace(/,\s*(;|\})/g, "$1");                // fix dangling commas
+  // remove zero-alpha shadow layers
+  out = out.replace(/(box-shadow\s*:\s*)([^;]+);/gi, (m, p, val) => {
+    const cleaned = val.split(/\s*,\s*/).filter(layer => !/rgba?\([^)]*,\s*0(?:\.0+)?\)/i.test(layer)).join(", ");
+    return `${p}${cleaned};`;
+  });
+  out = out.replace(/([^;\{\}\s])\s*\}/g, "$1; }");      // ensure semicolons
+  const open = (out.match(/\{/g) || []).length;
+  const close = (out.match(/\}/g) || []).length;
+  if (open > close) out += "}".repeat(open - close);     // balance braces
   return out.trim();
 }
-function tryParseJson(s){ try{ return JSON.parse(s); }catch{} const m=String(s||"").match(/\{[\s\S]*\}$/); if(m){ try{ return JSON.parse(m[0]); }catch{} } return {}; }
-function normalizeFacts(f){
-  const n=(v,d=0)=>Number.isFinite(+v)?Math.round(+v):d;
-  const hex=(c)=>typeof c==="string"?c.trim():"";
-  const b=(v)=>!!v;
 
-  const out = {
-    bg_kind: ["solid","gradient","transparent"].includes(f?.bg_kind) ? f.bg_kind
-             : (f?.has_gradient ? "gradient" : (f?.background_color ? "solid" : "transparent")),
-    background_color: hex(f?.background_color),
-    has_gradient: !!f?.has_gradient,
-    gradient_direction: typeof f?.gradient_direction==="string" ? f.gradient_direction : "",
-    gradient_stops: Array.isArray(f?.gradient_stops) ? f.gradient_stops.map(s=>({
-      pos: Number.isFinite(+s?.pos) ? Math.max(0,Math.min(1,+s.pos)) : 0,
-      color: hex(s?.color)
-    })) : [],
-
-    border_present: b(f?.border_present),
-    border_color: hex(f?.border_color),
-    border_width_px: n(f?.border_width_px, 1),
-    border_radius_px: n(f?.border_radius_px, 8),
-    is_pill: b(f?.is_pill),
-    pill_radius_px: n(f?.pill_radius_px, 9999),
-
-    shadow: { x_px:n(f?.shadow?.x_px,0), y_px:n(f?.shadow?.y_px,0), blur_px:n(f?.shadow?.blur_px,0), spread_px:n(f?.shadow?.spread_px,0), color: hex(f?.shadow?.color||"") },
-
-    text_color: typeof f?.text_color === "string" ? hex(f.text_color) : "", // no risky default
-    font_size_px: n(f?.font_size_px,14),
-    font_weight: n(f?.font_weight,500),
-    font_family: typeof f?.font_family === "string" ? f.font_family : "",
-
-    padding_x_px: n(f?.padding_x_px,12),
-    padding_y_px: n(f?.padding_y_px,6),
-    gap_px: n(f?.gap_px,8),
-
-    caret_visible: b(f?.caret_visible),
-    caret_color: hex(f?.caret_color || "#6b7280"),
-
-    link_color: hex(f?.link_color || ""),
-    link_underline: b(f?.link_underline),
-
-    button_text: typeof f?.button_text==="string" ? f.button_text : "",
-    input_placeholder: typeof f?.input_placeholder==="string" ? f.input_placeholder : "",
-    has_button: b(f?.has_button),
-    has_input: b(f?.has_input),
-    has_link: b(f?.has_link),
-    has_icon: b(f?.has_icon),
-  };
-
-  if (out.bg_kind === "gradient" && !out.gradient_stops.length) out.bg_kind = "transparent";
+function flattenGradients(css = "", solid = "") {
+  const color = solid && /^#|rgb|hsl|var\(/i.test(solid) ? solid : null;
+  let out = css.replace(/background-image\s*:\s*linear-gradient\([^;]+;/gi, m => color ? `background-color: ${color};` : m);
+  out = out.replace(/background\s*:\s*linear-gradient\([^;]+;/gi, m => color ? `background-color: ${color};` : m);
   return out;
 }
-function esc(s=""){ return String(s).replace(/[&<>"']/g,m=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[m])); }
-function sendError(res,status,error,details){ const p={ error:String(error||"Unknown") }; if(details) p.details=String(details); res.status(status).json(p); }
-function extractErr(e){ if (e?.response?.data) { try { return JSON.stringify(e.response.data); } catch {} return String(e.response.data); } return String(e?.message||e); }
+
+function minifyCss(css = "") {
+  return css
+    .replace(/\s*\/\*[\s\S]*?\*\/\s*/g, "")
+    .replace(/\s*([\{\}:;,])\s*/g, "$1")
+    .replace(/;}/g, "}")
+    .trim();
+}
+
+/* Build a reasonable HTML snippet from selectors */
+function buildHtmlFromCss(css, scope) {
+  const className = getScopeClass(scope);
+  const need = {
+    inputGeneric: /(^|[^\w-])input(\b|[\s\[#.:>{,])/i.test(css),
+    inputText: /\binput\[type\s*=\s*["']?text["']?\]/i.test(css),
+    inputEmail: /\binput\[type\s*=\s*["']?email["']?\]/i.test(css),
+    inputSearch: /\binput\[type\s*=\s*["']?search["']?\]/i.test(css),
+    textarea: /\btextarea\b/i.test(css),
+    select: /\bselect\b/i.test(css),
+    button: /\bbutton\b/i.test(css),
+    a: /\ba\b/i.test(css),
+    label: /\blabel\b/i.test(css),
+    img: /\bimg\b/i.test(css)
+  };
+
+  const parts = [];
+  if (need.label) parts.push(`<label for="field">Label</label>`);
+  if (need.inputText || need.inputGeneric) parts.push(`<input id="field" type="text" placeholder="Enter text">`);
+  if (need.inputEmail) parts.push(`<input type="email" placeholder="name@example.com">`);
+  if (need.inputSearch) parts.push(`<input type="search" placeholder="Search">`);
+  if (need.textarea) parts.push(`<textarea rows="3" placeholder="Type here"></textarea>`);
+  if (need.select) parts.push(`<select><option>One</option><option>Two</option></select>`);
+  if (need.img) parts.push(`<img alt="preview" src="https://dummyimage.com/80x48/ddd/999.png&text=img">`);
+  if (need.a) parts.push(`<a href="#">Link</a>`);
+  if (need.button) parts.push(`<button>Submit</button>`);
+  if (!parts.length) parts.push(`Button`);
+
+  return `<div class="${className}">\n  ${parts.join("\n  ")}\n</div>`;
+}
+
+/* Ask model for an HTML snippet, with image & hints */
+async function suggestHtml({ baseModel, image, css, scope, component, hints, callOnce }) {
+  try {
+    const html = await callOnce("html", { model: baseModel, image, css, scope, component, hints });
+    return htmlOnly(html);
+  } catch {
+    return "";
+  }
+}
+
+function ensureScopedHtml(html, scope) {
+  const className = getScopeClass(scope);
+  const rootRe = new RegExp(`<([a-z0-9-]+)([^>]*class=["'][^"']*${escapeReg(className)}[^"']*["'][^>]*)>`, "i");
+  if (rootRe.test(html)) return html.trim();
+  // wrap
+  return `<div class="${className}">\n${html.trim()}\n</div>`;
+}
+
+/* If CSS references inputs/buttons but HTML lacks them, inject reasonable defaults */
+function ensureHtmlCoversCss(html, css, hints, scope) {
+  let out = html.trim();
+  const hasInputCSS = /(^|[^\w-])input(\b|[\s\[#.:>{,])/i.test(css);
+  const hasButtonCSS = /\bbutton\b/i.test(css);
+  const hasInputHTML = /<input\b/i.test(out);
+  const hasButtonHTML = /<button\b/i.test(out);
+
+  if (hasInputCSS && !hasInputHTML) {
+    out = out.replace(/(<\/[a-z0-9-]+>\s*)$/i, `  <input type="text" placeholder="${escapeHtml(hints?.input_placeholder || 'Enter text')}">\n$1`);
+  }
+  if (hasButtonCSS && !hasButtonHTML) {
+    out = out.replace(/(<\/[a-z0-9-]+>\s*)$/i, `  <button>${escapeHtml(hints?.button_text || 'Submit')}</button>\n$1`);
+  }
+  return out;
+}
+
+/* Replace generic button/placeholder text with vision-derived strings */
+function applyTextHints(html, hints) {
+  if (!hints) return html;
+  let out = html;
+
+  if (hints.button_text) {
+    out = out.replace(/(<button[^>]*>)([\s\S]*?)(<\/button>)/i, (_, a, _txt, c) => `${a}${escapeHtml(hints.button_text)}${c}`);
+  }
+  if (hints.input_placeholder) {
+    out = out.replace(/(<input\b[^>]*)(placeholder=["'][^"']*["'])?/i, (m, head, ph) => {
+      if (/placeholder=/i.test(m)) {
+        return m.replace(/placeholder=["'][^"']*["']/i, `placeholder="${escapeHtml(hints.input_placeholder)}"`);
+      }
+      return `${head} placeholder="${escapeHtml(hints.input_placeholder)}"`;
+    });
+  }
+  return out;
+}
+
+function getScopeClass(scope = ".comp") { return String(scope || ".comp").trim().replace(/^\./, ""); }
+function escapeReg(s){ return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+function escapeHtml(s=""){ return String(s).replace(/[&<>"']/g, m=>({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[m])); }
+function fallbackInner(componentHint = "component") {
+  if (/input|field/i.test(componentHint)) return `<input type="text" placeholder="Enter text">`;
+  if (/link|anchor/i.test(componentHint)) return `<a href="#">Link</a>`;
+  if (/card/i.test(componentHint)) return `<div class="item"><h4>Title</h4><p>Body</p><button>Action</button></div>`;
+  return `<button>Submit</button>`;
+}
