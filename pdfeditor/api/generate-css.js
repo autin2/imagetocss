@@ -1,5 +1,5 @@
 // /api/generate-css.js
-// Vision → JSON spec → deterministic codegen (now supports composite "banner" containers)
+// Vision → JSON spec → deterministic codegen (segmented chips now support groups)
 // Returns: { css, html, spec, notes, scope, component, used_model }
 
 import OpenAI from "openai";
@@ -7,7 +7,7 @@ import OpenAI from "openai";
 /* ---------------- Model selection ---------------- */
 const MODEL_CHAIN = [
   process.env.OPENAI_MODEL, // optional override
-  "gpt-5",                  // prefer 5 if available
+  "gpt-5",
   "gpt-5-mini",
   "gpt-4o",
   "gpt-4o-mini"
@@ -15,7 +15,7 @@ const MODEL_CHAIN = [
 
 const FALLBACK_MODEL = "gpt-4o-mini";
 const isGpt5 = (m) => /^gpt-5(\b|-)/i.test(m);
-const supportsVision = (m) => /gpt-4o(?:-mini)?$/i.test(m); // safe vision default
+const supportsVision = (m) => /gpt-4o(?:-mini)?$/i.test(m);
 
 /* ---------------- Handler ---------------- */
 export default async function handler(req, res) {
@@ -51,15 +51,18 @@ export default async function handler(req, res) {
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     const model = await resolveUsableModel(client);
 
-    // 1) Vision → strict JSON spec (now composite-aware)
-    const spec = await getStyleSpec(client, model, { image, scope, component });
+    // 1) Vision → strict JSON spec (segmented: supports groups)
+    let spec = await getStyleSpec(client, model, { image, scope, component });
 
-    // 2) Deterministic codegen (handles button/input/segmented + banner/container with children)
+    // 1.5) Heuristic repair for segmented chips (if groups missing/weak)
+    spec = repairSegmented(spec);
+
+    // 2) Deterministic codegen
     let { css, html, notes } = codegen(spec, { scope, force_solid, solid_color });
 
     // 3) Safety: scope + autofix + base font/reset + ensure scoped HTML wrapper
     css = enforceScope(css, scope);
-    css = autofixCss(css);
+    css = prettyCss(autofixCss(css));       // make it readable even if model spacing was messy
     css = ensureBaseFontAndResets(css, scope);
     html = ensureScopedHtml(html, scope);
 
@@ -105,45 +108,50 @@ async function resolveUsableModel(client) {
 async function getStyleSpec(client, model, { image, scope, component }) {
   const useModel = supportsVision(model) ? model : "gpt-4o";
   const sys =
-    "You are a UI vision measurer. Return a STRICT JSON spec describing one component or a composite banner/container.\n" +
-    "Extract ALL visible text verbatim (no summarizing). If you see a banner-like container with an icon/left copy and a right CTA, " +
-    "return type:'banner' and include children for icon/title/text/button. No markdown. Only JSON.";
+    "You are a UI vision measurer. Return STRICT JSON describing either a single component or a composite control.\n" +
+    "If you see a pill/segmented control with multiple rounded chips, return type:'segmented' WITH groups[]; " +
+    "each group corresponds to one rounded capsule. In each group, list items[] in left→right order and mark:\n" +
+    "- role: 'label'|'value'|'link'|'dropdown'|'action'|'icon'|'divider'\n" +
+    "- text: exact visible text (verbatim)\n" +
+    "- caret: true if a ▼/▾/chevron is present next to the text\n" +
+    "- icon_x: true if an encircled × precedes the text\n" +
+    "For banners/containers return type:'banner' and children[]. No markdown, only JSON.";
 
-  // Composite-aware schema
+  // Composite + segmented schema with groups
   const schema = {
     type: "object",
     properties: {
       type: { enum: ["button","input","segmented","chip","badge","link","card","toggle","checkbox","radio","banner","container","unknown"] },
       text: { type: "string" },
       html_hint: { enum: ["button","a","input","div"] },
-      items: { type: "array", items: { type: "object" } }, // legacy (segmented)
-      children: {
+      // SEGMENTED
+      groups: {
         type: "array",
-        description: "For banner/container: ordered left-to-right content pieces",
+        description: "For segmented controls: array of pill groups; each contains items in visual order",
         items: {
           type: "object",
           properties: {
-            kind: { enum: ["icon","title","text","button","link","divider","unknown"] },
-            text: { type: "string" },
-            caret: { type: "boolean" },
-            icon_variant: { enum: ["info","warning","check","unknown"] },
-            font: {
-              type: "object",
-              properties: { size_px:{type:"number"}, weight:{type:"string"}, family_hint:{type:"string"} }
-            },
-            colors: {
-              type: "object",
-              properties: { text:{type:"string"}, bg:{type:"string"}, link:{type:"string"}, border:{type:"string"} }
-            },
-            border: {
-              type: "object",
-              properties: { width_px:{type:"number"}, style:{type:"string"}, color:{type:"string"}, radius_px:{type:"number"} }
-            },
-            padding: { type: "object", properties: { t:{type:"number"}, r:{type:"number"}, b:{type:"number"}, l:{type:"number"} } }
+            items: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  role: { enum: ["label","value","link","dropdown","action","icon","divider","unknown"] },
+                  text: { type: "string" },
+                  caret: { type: "boolean" },
+                  icon_x: { type: "boolean" },
+                  active: { type: "boolean" }
+                },
+                required: ["role"]
+              }
+            }
           },
-          required: ["kind"]
+          required: ["items"]
         }
       },
+      // LEGACY (kept for backward compatibility)
+      items: { type: "array", items: { type: "object" } },
+      // common
       font: {
         type: "object",
         properties: { family_hint:{type:"string"}, size_px:{type:"number"}, weight:{type:"string"} }
@@ -180,20 +188,19 @@ async function getStyleSpec(client, model, { image, scope, component }) {
   const usr = [
     `SCOPE: ${scope}`,
     `COMPONENT HINT: ${component}`,
-    "Task: Return ONLY JSON that matches this schema exactly:",
+    "Return ONLY JSON that matches this schema exactly:",
     JSON.stringify(schema),
     "",
     "Guidelines:",
-    "- Extract EVERY visible text fragment (title, description, button label, link). Do not summarize.",
-    "- If the layout is a banner/container with left copy + right CTA, set type:'banner' and fill `children` in visual order.",
-    "- For segmented pills use `type:'segmented'` and `items`.",
-    "- If no gradient is visible, set background.kind:'solid'.",
-    "- Prefer hex colors."
+    "- Extract EVERY visible text fragment; do not summarize.",
+    "- For segmented chips, you MUST split into groups[] by each rounded capsule.",
+    "- Mark link-like blue text as role:'link'. Mark caret where a ▼/▾ glyph is visible.",
+    "- Preceding encircled × becomes { role:'icon', icon_x:true }."
   ].join("\n");
 
   const params = isGpt5(useModel)
-    ? { max_completion_tokens: 1200 }
-    : { max_tokens: 1200, temperature: 0.1 };
+    ? { max_completion_tokens: 1400 }
+    : { max_tokens: 1400, temperature: 0.1 };
 
   const r = await client.chat.completions.create({
     model: useModel,
@@ -211,6 +218,51 @@ async function getStyleSpec(client, model, { image, scope, component }) {
   return safeParseJson(raw);
 }
 
+/* ---------------- Heuristic repair for segmented ---------------- */
+
+function repairSegmented(spec) {
+  if (!spec || (spec.type !== "segmented" && spec.type !== "chip")) return spec;
+
+  const s = { ...spec };
+  // If groups missing but flat items exist, try to split:
+  if ((!s.groups || !s.groups.length) && Array.isArray(s.items) && s.items.length) {
+    // Very simple: if we see both "Compare" and "Previous period", split after "Daily" (typical 3+2 layout)
+    const texts = s.items.map(i => (i.text || "").toLowerCase());
+    const hasCompare = texts.some(t => t.includes("compare"));
+    const hasPrev = texts.some(t => t.includes("previous"));
+    if (hasCompare && hasPrev) {
+      const left = [];
+      const right = [];
+      let toRight = false;
+      for (const it of s.items) {
+        const t = (it.text || "").toLowerCase();
+        if (!toRight && (t.includes("compare"))) toRight = true;
+        (toRight ? right : left).push(it);
+      }
+      s.groups = [
+        { items: normalizeSegItems(left) },
+        { items: normalizeSegItems(right) }
+      ];
+    } else {
+      s.groups = [{ items: normalizeSegItems(s.items) }];
+    }
+  } else if (s.groups?.length) {
+    // normalize each group
+    s.groups = s.groups.map(g => ({ items: normalizeSegItems(g.items || []) }));
+  }
+  return s;
+}
+
+function normalizeSegItems(items) {
+  return items.map(it => ({
+    role: it.role || "value",
+    text: it.text || "",
+    caret: !!it.caret,
+    icon_x: !!it.icon_x,
+    active: !!it.active
+  }));
+}
+
 /* ---------------- Deterministic codegen ---------------- */
 
 function codegen(spec, opts) {
@@ -219,12 +271,14 @@ function codegen(spec, opts) {
   const s = normalizeSpec(spec);
   const notes = [];
 
-  // Choose path
   if ((s.type === "banner" || s.type === "container") && s.children?.length) {
     return codegenBanner(s, opts);
   }
+  if (s.type === "segmented" && s.groups?.length) {
+    return codegenSegmentedGroups(s, opts);
+  }
 
-  // Previous paths: button, input, segmented, fallback
+  // Button/input/legacy segmented fallback
   const baseFont = `font: ${px(s.font.size_px || 14)}/${1.25} ${s.font.family_hint || 'system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif'};`;
   const textColor = s.colors.text || "#374151";
   const bg = buildBackground(s.background, opts);
@@ -243,15 +297,11 @@ function codegen(spec, opts) {
 ${scope}{ ${baseFont} color:${textColor}; }
 ${scope} .btn{
   appearance:none;-webkit-appearance:none;
-  display:inline-block;
-  ${bg}
-  color:${textColor};
-  border:${border};
-  border-radius:${radius};
-  padding:${padding};
-  ${boxShadow}
+  display:inline-block; ${bg} color:${textColor};
+  border:${border}; border-radius:${radius};
+  padding:${padding}; ${boxShadow}
   font-weight:${cssWeight(s.font.weight)};
-  text-decoration:none;cursor:pointer;text-align:center;
+  text-decoration:none; cursor:pointer; text-align:center;
 }
 ${scope} .btn:hover{ filter:brightness(1.04); }
 ${scope} .btn:active{ transform:translateY(1px); }
@@ -266,11 +316,8 @@ ${scope} .btn:focus-visible{ outline:2px solid #93c5fd; outline-offset:2px; }
       css = `
 ${scope}{ ${baseFont} color:${textColor}; }
 ${scope} input[type="${inputType}"]{
-  ${bg}
-  color:${textColor};
-  border:${border};
-  border-radius:${radius};
-  padding:${padding}; outline:none;
+  ${bg} color:${textColor}; border:${border};
+  border-radius:${radius}; padding:${padding}; outline:none;
 }
 ${scope} input[type="${inputType}"]:focus{ border-color:${s.colors.border || "#9ca3af"}; box-shadow:0 0 0 3px rgba(59,130,246,.2); }
 `.trim();
@@ -279,6 +326,7 @@ ${scope} input[type="${inputType}"]:focus{ border-color:${s.colors.border || "#9
     }
     case "segmented":
     case "chip": {
+      // legacy single-chip path
       const dividerColor = s.colors.divider || s.colors.border || "#e5e7eb";
       const linkColor = s.colors.link || "#2563eb";
       css = `
@@ -311,11 +359,11 @@ ${scope} .has-caret::after{ content:"▾"; font-size:11px;color:${s.colors.muted
       break;
     }
     default: {
-      // Generic block (fallback)
-      css = `
+      const cssBlock = `
 ${scope}{ ${baseFont} color:${textColor}; }
 ${scope} .block{ ${bg} color:${textColor}; border:${border}; border-radius:${radius}; padding:${padding}; ${boxShadow} }
 `.trim();
+      css = cssBlock;
       html = `<div class="${className}">\n  <div class="block">${escapeHtml(s.text || "Component")}</div>\n</div>`;
     }
   }
@@ -323,7 +371,53 @@ ${scope} .block{ ${bg} color:${textColor}; border:${border}; border-radius:${rad
   return { css, html, notes };
 }
 
-/* --- Banner/container with children (icon + title + text + CTA) --- */
+/* --- Segmented with GROUPS (multiple rounded chips) --- */
+function codegenSegmentedGroups(spec, opts) {
+  const scope = opts?.scope || ".comp";
+  const className = getScopeClass(scope);
+  const s = normalizeSpec(spec);
+
+  const baseFont = `font: ${px(s.font.size_px || 14)}/${1.25} ${s.font.family_hint || 'system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif'};`;
+  const textColor = s.colors.text || "#374151";
+  const border = `${px(s.border.width_px || 1)} ${s.border.style || "solid"} ${s.border.color || "#e5e7eb"}`;
+  const dividerColor = s.colors.divider || s.colors.border || "#e5e7eb";
+  const linkColor = s.colors.link || "#2563eb";
+  const pd = s.padding || {};
+  const padding = `${px(pd.t ?? 6)} ${px(pd.r ?? 10)} ${px(pd.b ?? 6)} ${px(pd.l ?? 10)}`;
+
+  const css = `
+${scope}{ ${baseFont} color:${textColor}; display:flex; gap:12px; }
+${scope} .chip{ display:inline-flex;align-items:center; border:${border}; border-radius:9999px; background:#fff; padding:2px 6px; }
+${scope} .seg{ display:inline-flex;align-items:center;gap:6px; padding:${padding}; border-radius:9999px; color:${textColor}; text-decoration:none; white-space:nowrap; }
+${scope} button.seg{ appearance:none;-webkit-appearance:none;background:transparent;border:0;font:inherit;color:inherit;padding:${padding}; cursor:pointer; }
+${scope} .divider{ width:1px;height:18px;margin:0 2px;background:${dividerColor}; }
+${scope} .seg.label{ color:${s.colors.muted || "#6b7280"}; }
+${scope} .seg.link, ${scope} .seg.value.linky{ color:${linkColor}; }
+${scope} .seg.link:hover, ${scope} .seg.value.linky:hover{ color:${shade(linkColor,-10)}; }
+${scope} .icon-x{ width:18px;height:18px;border-radius:9999px;border:1px solid ${shade(dividerColor,-10)}; color:${s.colors.muted || "#6b7280"}; display:inline-flex;align-items:center;justify-content:center;font-size:12px;line-height:1;font-weight:600;margin:0 4px 0 2px; }
+${scope} .icon-x::before{ content:"×"; }
+${scope} .has-caret::after{ content:"▾"; font-size:11px;color:${s.colors.muted || "#6b7280"};margin-left:6px; }
+`.trim();
+
+  const chips = s.groups.map(g => {
+    const parts = [];
+    (g.items || []).forEach((it, i) => {
+      if (i>0) parts.push(`<span class="divider"></span>`);
+      const careted = it.caret ? " has-caret" : "";
+      const linky = it.role === "link" || it.role === "dropdown" || it.role === "value" ? " linky" : "";
+      if (it.icon_x) parts.push(`<span class="seg"><span class="icon-x" aria-hidden="true"></span></span>`);
+      if (it.role === "label") parts.push(`<span class="seg label">${escapeHtml(it.text || "")}</span>`);
+      else if (it.role === "link") parts.push(`<a class="seg link${careted}" href="#">${escapeHtml(it.text || "")}</a>`);
+      else parts.push(`<button class="seg value${linky}${careted}">${escapeHtml(it.text || "")}</button>`);
+    });
+    return `  <div class="chip">\n    ${parts.join("\n    ")}\n  </div>`;
+  });
+
+  const html = `<div class="${className}">\n${chips.join("\n")}\n</div>`;
+  return { css, html, notes: "Segmented groups generated." };
+}
+
+/* --- Banner/container (kept from previous version) --- */
 function codegenBanner(spec, opts) {
   const scope = opts?.scope || ".comp";
   const className = getScopeClass(scope);
@@ -343,7 +437,6 @@ function codegenBanner(spec, opts) {
   const btn   = findChildText(s.children, "button") || "Action";
   const hasIcon = !!s.children?.find(c => c.kind === "icon");
 
-  // Button styling (use child's colors if available)
   const btnChild = s.children?.find(c => c.kind === "button") || {};
   const btnBg = colorOr(btnChild.colors?.bg) || "#ffffff";
   const btnText = colorOr(btnChild.colors?.text) || "#111827";
@@ -360,12 +453,9 @@ ${scope} .desc{ color:${textColor}; opacity:.85; }
 ${scope} .right{ flex:0 0 auto; }
 ${scope} .btn{
   appearance:none;-webkit-appearance:none;
-  background:${btnBg};
-  color:${btnText};
-  border:1px solid ${btnBorder};
-  border-radius:999px;
-  padding:8px 14px;
-  font-weight:600; cursor:pointer; white-space:nowrap;
+  background:${btnBg}; color:${btnText};
+  border:1px solid ${btnBorder}; border-radius:999px;
+  padding:8px 14px; font-weight:600; cursor:pointer; white-space:nowrap;
 }
 ${scope} .btn:hover{ filter:brightness(1.03); }
 ${scope} .icon{
@@ -463,6 +553,16 @@ function autofixCss(css = "") {
   return out.trim();
 }
 
+function prettyCss(css) {
+  // very light formatter: newlines between rules
+  return css
+    .replace(/\}\s*/g, "}\n")
+    .replace(/\{\s*/g, "{\n  ")
+    .replace(/;\s*/g, ";\n  ")
+    .replace(/\n\s*\n/g, "\n")
+    .trim();
+}
+
 function cssOnly(text = "") { return String(text).replace(/^```(?:css)?\s*/i, "").replace(/```$/i, "").trim(); }
 function htmlOnly(s = "") { return String(s).replace(/^```(?:html)?\s*/i, "").replace(/```$/i, "").trim(); }
 function safeParseJson(raw = "{}") {
@@ -486,6 +586,7 @@ function normalizeSpec(s = {}) {
     text: s.text || "",
     html_hint: s.html_hint || "div",
     items: Array.isArray(s.items) ? s.items : [],
+    groups: Array.isArray(s.groups) ? s.groups : [],
     children: Array.isArray(s.children) ? s.children : [],
     font: {
       family_hint: s.font?.family_hint || 'system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif',
@@ -493,26 +594,26 @@ function normalizeSpec(s = {}) {
       weight: s.font?.weight || "600"
     },
     colors: {
-      text: colorOr(s.colors?.text) || "#e5e7eb",
-      muted: colorOr(s.colors?.muted) || "#9ca3af",
-      link: colorOr(s.colors?.link) || "#60a5fa",
-      bg: colorOr(s.colors?.bg) || "#111827",
-      border: colorOr(s.colors?.border) || "#2f3133",
-      divider: colorOr(s.colors?.divider) || "#2f3133"
+      text: colorOr(s.colors?.text) || "#374151",
+      muted: colorOr(s.colors?.muted) || "#6b7280",
+      link: colorOr(s.colors?.link) || "#2563eb",
+      bg: colorOr(s.colors?.bg) || "#ffffff",
+      border: colorOr(s.colors?.border) || "#e5e7eb",
+      divider: colorOr(s.colors?.divider) || "#e5e7eb"
     },
     border: {
       width_px: n(s.border?.width_px ?? 1),
       style: s.border?.style || "solid",
-      color: colorOr(s.border?.color) || "#2f3133",
-      radius_px: n(s.border?.radius_px ?? 10)
+      color: colorOr(s.border?.color) || "#e5e7eb",
+      radius_px: n(s.border?.radius_px ?? 18)
     },
     padding: {
-      t: n(s.padding?.t ?? 16),
-      r: n(s.padding?.r ?? 16),
-      b: n(s.padding?.b ?? 16),
-      l: n(s.padding?.l ?? 16)
+      t: n(s.padding?.t ?? 6),
+      r: n(s.padding?.r ?? 10),
+      b: n(s.padding?.b ?? 6),
+      l: n(s.padding?.l ?? 10)
     },
-    background: s.background || { kind:"solid", color:"#111827" },
+    background: s.background || { kind:"solid", color:"#ffffff" },
     shadow: Array.isArray(s.shadow) ? s.shadow : []
   };
 }
