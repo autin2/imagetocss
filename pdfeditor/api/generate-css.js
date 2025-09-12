@@ -1,133 +1,86 @@
 // /api/generate-css.js
-// Component-scoped CSS generator with critique→fix loops and robust HTML builder.
-// Improvements:
-// - Vision “hints” now extracts segmented-control tokens from the image (labels, dropdowns, link-like items, dot icon).
-// - HTML generator renders a single-pill .chip with inline .seg items, .divider bars, optional .dot,
-//   and adds caret markers when segments look like dropdowns.
-// - Still returns plain CSS (scoped), but HTML now better reflects segmented controls.
+// Vision → Style JSON → Deterministic codegen for reliable, scoped CSS + HTML.
+// Response: { css, html, spec, notes, scope, component, used_model }
 //
 // ENV:
-//   OPENAI_API_KEY (required)
-//   OPENAI_MODEL   (optional) one of: gpt-5, gpt-5-mini, gpt-4o, gpt-4o-mini
-//
-// Response JSON:
-//   { draft, css, html, versions, passes, palette, notes, scope, component, used_model }
+//   OPENAI_API_KEY  (required)
+//   OPENAI_MODEL    (optional) one of: gpt-5, gpt-5-mini, gpt-4o, gpt-4o-mini
 
 import OpenAI from "openai";
 
 /* ---------------- Models ---------------- */
 const MODEL_CHAIN = [
-  process.env.OPENAI_MODEL, // optional override
+  process.env.OPENAI_MODEL, // allow override
   "gpt-5",
   "gpt-5-mini",
   "gpt-4o",
   "gpt-4o-mini"
 ].filter(Boolean);
 
-const DEFAULT_MODEL = MODEL_CHAIN[0] || "gpt-4o-mini";
+const FALLBACK_MODEL = "gpt-4o-mini";
 
-function supportsVision(model) { return /gpt-4o(?:-mini)?$/i.test(model); }
-function isGpt5(m){ return /^gpt-5(\b|-)/i.test(m); }
+const isGpt5 = (m) => /^gpt-5(\b|-)/i.test(m);
+const supportsVision = (m) => /gpt-4o(?:-mini)?$/i.test(m);
 
-/* ---------------- HTTP handler ---------------- */
+/* ---------------- Handler ---------------- */
 export default async function handler(req, res) {
   try {
     if (req.method !== "POST") {
       res.setHeader("Allow", "POST");
-      return res.status(405).json({ error: "Method not allowed", details: "Use POST /api/generate-css" });
+      return res.status(405).json({ error: "Method not allowed" });
     }
 
     let raw = "";
     for await (const chunk of req) raw += chunk;
 
-    let body = {};
-    try { body = raw ? JSON.parse(raw) : {}; }
-    catch (e) { return sendError(res, 400, "Bad JSON", e?.message, "Send Content-Type: application/json"); }
+    let payload = {};
+    try { payload = raw ? JSON.parse(raw) : {}; }
+    catch (e) { return sendError(res, 400, "Bad JSON", e?.message); }
 
     const {
       image,
-      palette = [],
-      double_checks = 1,            // 1–8
       scope = ".comp",
       component = "component",
-      force_solid = false,          // optional: replace gradients with solid
-      solid_color = "",             // optional solid color
-      minify = false,               // optional minify result
+      force_solid = false,
+      solid_color = "",
       debug = false
-    } = body;
+    } = payload;
 
     if (!image || typeof image !== "string" || !/^data:image\//i.test(image)) {
-      return sendError(res, 400, "Invalid 'image'", "Expected data URL: data:image/*;base64,...");
+      return sendError(res, 400, "Send { image: dataUrl, scope?, component?, force_solid?, solid_color? }");
     }
     if (!process.env.OPENAI_API_KEY) {
       return sendError(res, 500, "OPENAI_API_KEY not configured");
     }
 
-    const cycles = clampInt(double_checks, 1, 8);
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-    const { resolveModel, callOnce } = makeOpenAI(client);
+    const model = await resolveUsableModel(client);
 
-    const baseModel = await resolveModel();
+    // 1) SPEC (Vision → JSON)
+    const spec = await getStyleSpec(client, model, { image, scope, component });
 
-    // ---------- DRAFT ----------
-    let draft = await safeDraft({ baseModel, image, palette, scope, component, callOnce });
-    draft = enforceScope(draft, scope);
+    // 2) Deterministic codegen
+    let { css, html, notes } = codegen(spec, { scope, force_solid, solid_color });
 
-    let css = draft;
-    const versions = [draft];
-    let lastCritique = "";
-
-    // ---------- CRITIQUE→FIX ----------
-    for (let i = 1; i <= cycles; i++) {
-      lastCritique = await safeCritique({
-        baseModel, image, css, palette, scope, component, cycle: i, total: cycles, callOnce
-      });
-      let fixed = await safeFix({
-        baseModel, image, css, critique: lastCritique, palette, scope, component, cycle: i, total: cycles, callOnce
-      });
-      fixed = enforceScope(fixed, scope);
-      css = fixed;
-      versions.push(css);
-    }
-
-    // ---------- POST ----------
-    css = cssOnly(css);
+    // 3) Safety: scope + autofix
+    css = enforceScope(css, scope);
     css = autofixCss(css);
-    if (!css.trim()) return sendError(res, 502, "Model returned no CSS", "Empty completion after retries.");
+    css = ensureBaseFontAndResets(css, scope);
+    html = ensureScopedHtml(html, scope);
 
-    if (force_solid) css = flattenGradients(css, solid_color);
-    if (minify) css = minifyCss(css);
-
-    // ---------- VISION HINTS (extract visible strings + segmented tokens) ----------
-    const hints = await extractHints({ baseModel, image, scope, component, callOnce });
-
-    // ---------- HTML (vision + CSS-coverage + segmented control support) ----------
-    let html = await suggestHtml({ baseModel, image, css, scope, component, hints, callOnce });
-    if (!html || !html.trim()) {
-      // Build from hints (segmented control) if possible, else fallback from CSS
-      html = buildHtmlFromHints(hints, scope) || buildHtmlFromCss(css, scope) || ensureScopedHtml(`<div>${fallbackInner(component)}</div>`, scope);
-    }
-    html = ensureScopedHtml(htmlOnly(html), scope);
-    html = ensureHtmlCoversCss(html, css, hints, scope); // make sure input/button exist if styled
-    html = applyTextHints(html, hints);                  // inject “Subscribe”, placeholders, etc.
-
-    const payload = {
-      draft,
-      css,
-      html,
-      versions,
-      passes: 1 + cycles * 2,
-      palette,
-      notes: lastCritique,
-      scope,
-      component,
-      used_model: baseModel,
-      ...(debug ? { debug: { model_chain: MODEL_CHAIN, vision_supported: supportsVision(baseModel), hints } } : {})
-    };
+    if (!css.trim()) return sendError(res, 502, "Model returned empty CSS spec");
 
     res.setHeader("Cache-Control", "no-store");
-    return res.status(200).json(payload);
-
+    return res.status(200).json({
+      css,
+      html,
+      spec,
+      notes,
+      scope,
+      component,
+      used_model: model,
+      ...(debug ? { debug: { model_chain: MODEL_CHAIN } } : {})
+    });
   } catch (err) {
     return sendError(res, 500, "Failed to generate CSS.", extractErrMsg(err));
   }
@@ -135,255 +88,345 @@ export default async function handler(req, res) {
 
 /* ---------------- OpenAI glue ---------------- */
 
-function buildChatParams({ model, messages, kind }) {
-  const base = { model, messages };
-  const BUDGET = { draft: 1400, critique: 800, fix: 1600, html: 800, hints: 380 };
-  const max = BUDGET[kind] || 900;
-
-  if (isGpt5(model)) {
-    base.max_completion_tokens = max;     // GPT-5 family
-  } else {
-    base.max_tokens = max;                // 4o / 4o-mini
-    base.temperature = kind === "critique" ? 0.0 : (kind === "draft" ? 0.2 : 0.1);
-  }
-  return base;
-}
-
-function makeOpenAI(client) {
-  async function tryEachModel(run) {
-    let lastErr;
-    for (const model of (MODEL_CHAIN.length ? MODEL_CHAIN : [DEFAULT_MODEL])) {
-      try { await run(model); return { model }; }
-      catch (e) {
-        lastErr = e;
-        const msg = String(e?.message || "");
-        const soft = e?.status === 404 || /does not exist|unknown model|restricted/i.test(msg);
-        if (!soft) throw e;
-      }
-    }
-    throw lastErr || new Error("No usable model found");
-  }
-
-  const resolveModel = async () => {
-    const { model } = await tryEachModel(async (m) => {
+async function resolveUsableModel(client) {
+  for (const m of (MODEL_CHAIN.length ? MODEL_CHAIN : [FALLBACK_MODEL])) {
+    try {
+      const params = isGpt5(m) ? { max_completion_tokens: 16 } : { max_tokens: 16 };
       await client.chat.completions.create({
         model: m,
         messages: [{ role: "user", content: "ping" }],
-        ...(isGpt5(m) ? { max_completion_tokens: 16 } : { max_tokens: 16 })
+        ...params
       });
-    });
-    return model;
+      return m;
+    } catch (e) {
+      const msg = String(e?.message || "");
+      const soft = e?.status === 404 || /does not exist|unsupported|unknown/i.test(msg);
+      if (!soft) throw e; // hard error
+    }
+  }
+  return FALLBACK_MODEL;
+}
+
+async function getStyleSpec(client, model, { image, scope, component }) {
+  // Vision model preferred; if not available, fall back to 4o-mini for JSON from image.
+  const useModel = supportsVision(model) ? model : "gpt-4o";
+  const sys =
+    "You are a UI vision measurer. Return a STRICT JSON spec describing a SINGLE component (not a full page). " +
+    "Be precise with colors (hex), sizes (px), and booleans. Never return Markdown, comments, or extra text.";
+
+  const schema = {
+    type: "object",
+    properties: {
+      type: { enum: ["button","input","chip","segmented","badge","link","card","toggle","checkbox","radio","unknown"] },
+      text: { type: "string" },
+      items: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            text: { type: "string" },
+            role: { enum: ["label","value","link","dropdown","action","icon","divider","unknown"] },
+            caret: { type: "boolean" },
+            icon_x: { type: "boolean" },
+            dot: { type: "boolean" },
+            active: { type: "boolean" }
+          },
+          required: ["role"],
+          additionalProperties: true
+        }
+      },
+      html_hint: { enum: ["button","a","input","div"] },
+      font: {
+        type: "object",
+        properties: {
+          family_hint: { type: "string" },
+          size_px: { type: "number" },
+          weight: { type: "string" },
+          transform: { type: "string" },
+          letter_spacing: { type: "number" }
+        },
+        additionalProperties: true
+      },
+      colors: {
+        type: "object",
+        properties: {
+          text: { type: "string" },
+          muted: { type: "string" },
+          link: { type: "string" },
+          bg: { type: "string" },
+          border: { type: "string" },
+          divider: { type: "string" }
+        },
+        additionalProperties: true
+      },
+      border: {
+        type: "object",
+        properties: {
+          width_px: { type: "number" },
+          style: { type: "string" },
+          color: { type: "string" },
+          radius_px: { type: "number" }
+        },
+        additionalProperties: true
+      },
+      padding: {
+        type: "object",
+        properties: { t:{type:"number"}, r:{type:"number"}, b:{type:"number"}, l:{type:"number"} },
+        additionalProperties: false
+      },
+      background: {
+        type: "object",
+        properties: {
+          kind: { enum: ["solid","gradient","transparent"] },
+          color: { type: "string" },
+          gradient: {
+            type: "object",
+            properties: {
+              direction: { type: "string" },
+              stops: {
+                type: "array",
+                items: { type: "object", properties: { color:{type:"string"}, pct:{type:"number"} }, required:["color"] }
+              }
+            }
+          }
+        },
+        additionalProperties: true
+      },
+      shadow: {
+        type: "array",
+        items: { type: "object", properties: { x:{type:"number"}, y:{type:"number"}, blur:{type:"number"}, spread:{type:"number"}, rgba:{type:"string"} },
+                 required:["x","y","blur","spread","rgba"] }
+      }
+    },
+    required: ["type","font","colors","border","padding","background"],
+    additionalProperties: true
   };
 
-  const callOnce = async (kind, args) => {
-    let modelForThisCall = args.model;
-    const usingImage = !!args.image && !args.no_image;
-    if (usingImage && !supportsVision(modelForThisCall)) modelForThisCall = "gpt-4o";
+  const usr =
+    [
+      `SCOPE: ${scope}`,
+      `COMPONENT HINT: ${component}`,
+      "Task: Return ONLY JSON matching this schema:",
+      JSON.stringify(schema),
+      "",
+      "Guidelines:",
+      "- If it's a segmented/chip control: type='segmented' and fill `items` in visual order.",
+      "- Extract the exact visible text (e.g., 'Subscribe', 'Last 7 days').",
+      "- If no gradient is visible, set background.kind='solid' and provide `color`.",
+      "- Hex colors preferred; use closest approximations."
+    ].join("\n");
 
-    const sys = {
-      draft:
-        "You are a front-end CSS engine. Output VALID vanilla CSS only (no HTML/Markdown). " +
-        "You are styling ONE UI COMPONENT (not a full page). " +
-        "All selectors MUST be scoped under the provided SCOPE CLASS. " +
-        "Do NOT target html/body/universal selectors or add resets/normalizers. " +
-        "If the screenshot shows a SEGMENTED PILL/CHIP (one rounded container with multiple inline items separated by thin dividers), " +
-        "write rules for the container (e.g., `.chip`), segment items (e.g., `.seg`), divider lines (`.divider`), " +
-        "and small dot/chevron decorations when present. " +
-        "If no gradient is visible, prefer a solid background-color. Return CSS ONLY.",
-      critique:
-        "You are a strict component QA assistant. Do NOT output CSS. Compare screenshot vs CURRENT CSS. " +
-        "Call out mismatches in: container shape (single rounded pill), inline segment spacing, divider visibility, dot/chevron, " +
-        "font size/weight, colors, borders, radius, shadows, and whether items are links or buttons. Be terse.",
-      fix:
-        "Return CSS only (no HTML/Markdown). Overwrite the stylesheet to resolve the critique and better match the screenshot. " +
-        "Keep all selectors under the scope. Include container `.chip`, `.seg`, `.divider`, `.dot`, caret pseudo-elements if needed.",
-      html:
-        "Return HTML ONLY (no code fences). Build a minimal DOM that demonstrates the CSS. " +
-        "If the screenshot shows a segmented pill, render a single `.chip` container with inline `.seg` items separated by `.divider` spans. " +
-        "Include a small `.dot` element before 'Compare' if visible and a caret (▼) for dropdown-like items. " +
-        "Use the provided HINTS to set button/link text and placeholders.",
-      hints:
-        "Return JSON ONLY that describes visible UI tokens for a SINGLE component. " +
-        "{ \"segments\": [ {\"text\": string, \"role\": \"label|dropdown|link|toggle|value|unknown\", \"caret\": boolean, \"dot\": boolean } , ... ], " +
-        "\"has_input\": boolean, \"input_type\": \"text|email|search|password|other|unknown\", \"input_placeholder\": string, " +
-        "\"has_button\": boolean, \"button_text\": string }. " +
-        "If there is a segmented pill, fill `segments` in visual order using concise text (e.g., 'Date range', 'Last 7 days', 'Daily', 'Compare', 'Previous period')."
-    }[kind];
+  const params = isGpt5(useModel)
+    ? { max_completion_tokens: 700 }
+    : { max_tokens: 700, temperature: 0.1 };
 
-    // messages
-    const baseLines = [
-      `SCOPE CLASS: ${args.scope}`,
-      `COMPONENT TYPE (hint): ${args.component}`
-    ];
+  const r = await client.chat.completions.create({
+    model: useModel,
+    messages: [
+      { role: "system", content: sys },
+      { role: "user", content: [{ type:"text", text: usr }, { type:"image_url", image_url:{ url:image, detail:"high" } }] }
+    ],
+    ...params
+  });
 
-    let messages;
-    if (kind === "draft") {
-      const usr = [
-        ...baseLines,
-        usingImage
-          ? "Study the screenshot and produce CSS for ONLY that component."
-          : "No screenshot available; produce reasonable CSS for the component using the hint/palette.",
-        "- Prefix selectors with the scope or use the scope as root.",
-        "- No resets or page layout.",
-        args.palette?.length ? `Optional palette tokens: ${args.palette.join(", ")}` : "Palette: optional.",
-        "Return CSS ONLY."
-      ].join("\n");
-      messages = usingImage
-        ? [{ role: "system", content: sys }, { role: "user", content: [{ type: "text", text: usr }, { type: "image_url", image_url: { url: args.image, detail: "high" } }] }]
-        : [{ role: "system", content: sys }, { role: "user", content: [{ type: "text", text: usr }] }];
-    }
-    else if (kind === "critique") {
-      const usr = [
-        ...baseLines,
-        `Critique ${args.cycle}/${args.total}.`,
-        "", "CURRENT CSS:", "```css", args.css, "```",
-        args.palette?.length ? `Palette hint: ${args.palette.join(", ")}` : ""
-      ].join("\n");
-      messages = usingImage
-        ? [{ role: "system", content: sys }, { role: "user", content: [{ type: "text", text: usr }, { type: "image_url", image_url: { url: args.image, detail: "high" } }] }]
-        : [{ role: "system", content: sys }, { role: "user", content: [{ type: "text", text: usr }] }];
-    }
-    else if (kind === "fix") {
-      const usr = [
-        ...baseLines,
-        `Fix ${args.cycle}/${args.total}.`,
-        "Rules:",
-        "- Keep all selectors under the scope.",
-        "- Include container/segments/dividers if screenshot shows a segmented pill.",
-        "", "CRITIQUE:", args.critique || "(none)",
-        "", "CURRENT CSS:", "```css", args.css, "```",
-        args.palette?.length ? `Palette hint: ${args.palette.join(", ")}` : ""
-      ].join("\n");
-      messages = usingImage
-        ? [{ role: "system", content: sys }, { role: "user", content: [{ type: "text", text: usr }, { type: "image_url", image_url: { url: args.image, detail: "high" } }] }]
-        : [{ role: "system", content: sys }, { role: "user", content: [{ type: "text", text: usr }] }];
-    }
-    else if (kind === "html") {
-      const usr = [
-        ...baseLines,
-        "Generate minimal HTML that picks up ALL styles in the CSS. Root must use the scope class.",
-        "If you detect a segmented pill, use:",
-        "  <div class=\"chip\">",
-        "    <span class=\"seg label\">Date range</span><span class=\"divider\"></span>",
-        "    <button class=\"seg value has-caret\">Last 7 days</button><span class=\"divider\"></span>",
-        "    <button class=\"seg value has-caret\">Daily</button>",
-        "  </div>",
-        "  <div class=\"chip\">",
-        "    <span class=\"seg dot\" aria-hidden=\"true\"></span>",
-        "    <button class=\"seg value\">Compare</button><span class=\"divider\"></span>",
-        "    <a class=\"seg link has-caret\" href=\"#\">Previous period</a>",
-        "  </div>",
-        "Use HINTS below to select exact text.",
-        "", "CSS:", "```css", args.css, "```",
-        args.hints ? `\nHINTS JSON: ${JSON.stringify(args.hints)}` : ""
-      ].join("\n");
-      messages = [
-        { role: "system", content: sys },
-        { role: "user", content: [{ type: "text", text: usr }, ...(args.image && !args.no_image ? [{ type: "image_url", image_url: { url: args.image, detail: "high" } }] : [])] }
-      ];
-    }
-    else if (kind === "hints") {
-      const usr = [
-        ...baseLines,
-        "Extract UI strings/tokens from this screenshot.",
-        "Return JSON ONLY as specified. No code fences."
-      ].join("\n");
-      messages = [
-        { role: "system", content: sys },
-        { role: "user", content: [{ type: "text", text: usr }, { type: "image_url", image_url: { url: args.image, detail: "high" } }] }
-      ];
-    }
-    else throw new Error(`Unknown kind: ${kind}`);
-
-    const params = buildChatParams({ model: modelForThisCall, messages, kind });
-    const r = await client.chat.completions.create(params);
-
-    if (kind === "critique") return textOnly(r?.choices?.[0]?.message?.content || "");
-    if (kind === "html")     return htmlOnly(r?.choices?.[0]?.message?.content || "");
-    if (kind === "hints")    return jsonOnly(r?.choices?.[0]?.message?.content || "{}");
-    // draft/fix
-    return cssOnly(r?.choices?.[0]?.message?.content || (kind === "fix" ? args.css : ""));
-  };
-
-  return { resolveModel, callOnce };
+  const raw = r?.choices?.[0]?.message?.content || "{}";
+  return safeParseJson(raw);
 }
 
-/* ---------------- Recovery wrappers ---------------- */
+/* ---------------- Deterministic Codegen ---------------- */
 
-async function safeDraft({ baseModel, image, palette, scope, component, callOnce }) {
-  let out = await callOnce("draft", { model: baseModel, image, palette, scope, component });
-  if (out && out.trim()) return out;
-  out = await callOnce("draft", { model: baseModel, image, palette, scope, component });
-  if (out && out.trim()) return out;
-  for (const m of ["gpt-4o", "gpt-4o-mini"]) {
-    try { out = await callOnce("draft", { model: m, image, palette, scope, component }); if (out && out.trim()) return out; } catch {}
+function codegen(spec, opts) {
+  const scope = opts?.scope || ".comp";
+  const className = getScopeClass(scope);
+  const s = normalizeSpec(spec);
+  const notes = [];
+
+  let css = "";
+  let html = "";
+
+  const baseFont = `font: ${px(s.font.size_px || 14)}/${1.25} ${s.font.family_hint || 'system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif'};`;
+  const textColor = s.colors.text || "#374151";
+
+  // Background
+  const bg = buildBackground(s.background, opts);
+
+  // Border
+  const border = `${px(s.border.width_px || 1)} ${s.border.style || "solid"} ${s.border.color || "#e5e7eb"}`;
+  const radius = px(s.border.radius_px || 8);
+
+  // Shadow
+  const boxShadow = buildShadow(s.shadow);
+
+  // Padding
+  const pd = s.padding || {};
+  const padding = `${px(pd.t ?? 8)} ${px(pd.r ?? 12)} ${px(pd.b ?? 8)} ${px(pd.l ?? 12)}`;
+
+  // --- Per-type codegen
+  switch (s.type) {
+    case "button": {
+      css = `
+${scope}{
+  ${baseFont}
+  color:${textColor};
+}
+${scope} .btn{
+  appearance:none;-webkit-appearance:none;
+  display:inline-block;
+  ${bg}
+  color:${textColor};
+  border:${border};
+  border-radius:${radius};
+  padding:${padding};
+  ${boxShadow}
+  font-weight:${cssWeight(s.font.weight)};
+  text-decoration:none;
+  cursor:pointer;
+  text-align:center;
+}
+${scope} .btn:hover{ filter:brightness(1.04); }
+${scope} .btn:active{ transform:translateY(1px); }
+${scope} .btn:focus-visible{ outline:2px solid #93c5fd; outline-offset:2px; }
+      `.trim();
+
+      const label = s.text || "Button";
+      html = `<div class="${className}">\n  <button class="btn">${escapeHtml(label)}</button>\n</div>`;
+      break;
+    }
+
+    case "input": {
+      const inputType = s.html_hint === "input" ? "text" : (inferInputTypeFromColors(s) || "text");
+      css = `
+${scope}{ ${baseFont} color:${textColor}; }
+${scope} input[type="${inputType}"]{
+  ${bg}
+  color:${textColor};
+  border:${border};
+  border-radius:${radius};
+  padding:${padding};
+  outline:none;
+}
+${scope} input[type="${inputType}"]:focus{
+  border-color:${s.colors.border || "#9ca3af"};
+  box-shadow:0 0 0 3px rgba(59,130,246,.2);
+}
+      `.trim();
+      html = `<div class="${className}">\n  <input type="${inputType}" placeholder="${escapeHtml(s.text || "Enter text")}">\n</div>`;
+      break;
+    }
+
+    case "segmented":
+    case "chip": {
+      // Segmented pill / chips
+      const dividerColor = s.colors.divider || s.colors.border || "#e5e7eb";
+      const linkColor = s.colors.link || "#2563eb";
+      css = `
+${scope}{
+  ${baseFont}
+  color:${textColor};
+}
+${scope} .chip{
+  display:inline-flex;align-items:center;
+  border:${border}; border-radius:9999px; background:#fff; padding:2px 6px;
+}
+${scope} .seg{
+  display:inline-flex;align-items:center;gap:6px;
+  padding:${padding};
+  border-radius:9999px; color:${textColor}; text-decoration:none; white-space:nowrap;
+}
+${scope} button.seg{ appearance:none;-webkit-appearance:none;background:transparent;border:0;font:inherit;color:inherit;padding:${padding}; }
+${scope} .divider{ width:1px;height:18px;margin:0 2px;background:${dividerColor}; }
+${scope} .seg.label{ color:${s.colors.muted || "#6b7280"}; }
+${scope} .seg.link, ${scope} .seg.value.linky{ color:${linkColor}; }
+${scope} .seg.link:hover, ${scope} .seg.value.linky:hover{ color:${shade(linkColor,-10)}; }
+${scope} .icon-x{
+  width:18px;height:18px;border-radius:9999px;border:1px solid ${shade(dividerColor,-10)};
+  color:${s.colors.muted || "#6b7280"};
+  display:inline-flex;align-items:center;justify-content:center;font-size:12px;line-height:1;font-weight:600;margin:0 4px 0 2px;
+}
+${scope} .icon-x::before{ content:"×"; }
+${scope} .has-caret::after{ content:"▾"; font-size:11px;color:${s.colors.muted || "#6b7280"};margin-left:6px; }
+      `.trim();
+
+      const parts = [];
+      const items = Array.isArray(s.items) ? s.items : [];
+      items.forEach((it, i) => {
+        if (i>0) parts.push(`<span class="divider"></span>`);
+        const careted = it.caret ? " has-caret" : "";
+        const linky = it.role === "link" || it.role === "dropdown" || it.role === "value" ? " linky" : "";
+        if (it.icon_x) parts.push(`<span class="seg"><span class="icon-x" aria-hidden="true"></span></span>`);
+        if (it.role === "label") parts.push(`<span class="seg label">${escapeHtml(it.text || "")}</span>`);
+        else if (it.role === "link") parts.push(`<a class="seg link${careted}" href="#">${escapeHtml(it.text || "")}</a>`);
+        else parts.push(`<button class="seg value${linky}${careted}">${escapeHtml(it.text || "")}</button>`);
+      });
+
+      html = `<div class="${className}">\n  <div class="chip">\n    ${parts.join("\n    ")}\n  </div>\n</div>`;
+      break;
+    }
+
+    default: {
+      // Generic block
+      css = `
+${scope}{ ${baseFont} color:${textColor}; }
+${scope} .block{
+  ${bg}
+  color:${textColor};
+  border:${border};
+  border-radius:${radius};
+  padding:${padding};
+  ${boxShadow}
+}
+      `.trim();
+      html = `<div class="${className}">\n  <div class="block">${escapeHtml(s.text || "Component")}</div>\n</div>`;
+    }
   }
-  try { out = await callOnce("draft", { model: "gpt-4o-mini", no_image: true, image: null, palette, scope, component }); if (out && out.trim()) return out; } catch {}
-  return "";
+
+  return { css, html, notes };
 }
 
-async function safeCritique(args) { try { return await args.callOnce("critique", args); } catch { return ""; } }
-async function safeFix(args) { try { return await args.callOnce("fix", args); } catch { return args.css || ""; } }
+/* ---------------- Build helpers ---------------- */
 
-/* Extract tokens/labels from the screenshot */
-async function extractHints({ baseModel, image, scope, component, callOnce }) {
-  try {
-    const json = await callOnce("hints", { model: baseModel, image, scope, component });
-    // normalize
-    const segments = Array.isArray(json?.segments) ? json.segments.map(s => ({
-      text: String(s?.text || "").trim(),
-      role: String(s?.role || "unknown").toLowerCase(),
-      caret: !!s?.caret,
-      dot: !!s?.dot
-    })).filter(s => s.text) : [];
-    return {
-      segments,
-      has_input: !!json?.has_input,
-      input_type: String(json?.input_type || "").toLowerCase(),
-      input_placeholder: typeof json?.input_placeholder === "string" ? json.input_placeholder : "",
-      has_button: !!json?.has_button,
-      button_text: typeof json?.button_text === "string" ? json.button_text : ""
-    };
-  } catch {
-    return { segments: [], has_input: false, input_type: "", input_placeholder: "", has_button: false, button_text: "" };
+function buildBackground(bg, opts) {
+  if (!bg || bg.kind === "transparent") return "";
+  if (opts?.force_solid) {
+    const solid = colorOr(bg.color) || opts.solid_color || "#ffffff";
+    return `background-color:${solid};`;
   }
-}
-
-/* ---------------- Helpers & post-processing ---------------- */
-
-function clampInt(v, min, max) {
-  const n = Number(v);
-  if (Number.isNaN(n)) return min;
-  return Math.max(min, Math.min(max, Math.floor(n)));
-}
-
-function sendError(res, status, error, details, hint) {
-  const payload = { error: String(error || "Unknown") };
-  if (details) payload.details = String(details);
-  if (hint) payload.hint = String(hint);
-  res.status(status).json(payload);
-}
-function extractErrMsg(err) {
-  if (err?.response?.data) {
-    try { return JSON.stringify(err.response.data); } catch {}
-    return String(err.response.data);
+  if (bg.kind === "solid") {
+    return `background-color:${colorOr(bg.color) || "#ffffff"};`;
   }
-  if (err?.message) return err.message;
-  return String(err);
+  if (bg.kind === "gradient" && bg.gradient && Array.isArray(bg.gradient.stops) && bg.gradient.stops.length) {
+    const dir = bg.gradient.direction || "to bottom";
+    const stops = bg.gradient.stops
+      .map(s => `${colorOr(s.color) || "#ffffff"}${typeof s.pct === "number" ? ` ${Math.max(0, Math.min(100, Math.round(s.pct)))}%` : ""}`)
+      .join(", ");
+    return `background: linear-gradient(${dir}, ${stops});`;
+  }
+  // fallback
+  return `background-color:${colorOr(bg.color) || "#ffffff"};`;
 }
 
-function cssOnly(text = "") { return String(text).replace(/^```(?:css)?\s*/i, "").replace(/```$/i, "").trim(); }
-function textOnly(s = "") { return String(s).replace(/```[\s\S]*?```/g, "").trim(); }
-function htmlOnly(s = "") { return String(s).replace(/^```(?:html)?\s*/i, "").replace(/```$/i, "").trim(); }
-function jsonOnly(s = "") {
-  const raw = String(s || "");
-  try { return JSON.parse(raw); } catch {}
-  const m = raw.match(/\{[\s\S]*\}/);
-  if (m) { try { return JSON.parse(m[0]); } catch {} }
-  return {};
+function buildShadow(sh) {
+  if (!Array.isArray(sh) || !sh.length) return "";
+  const layers = sh
+    .map(x => `${px(n(x.x))} ${px(n(x.y))} ${px(n(x.blur))} ${px(n(x.spread))} ${rgbaOr(x.rgba) || "rgba(0,0,0,.15)"}`)
+    .join(", ");
+  return `box-shadow:${layers};`;
 }
 
-/** Scope top-level selectors (not @rules or :root) */
+/* ---------------- Utilities ---------------- */
+
+function ensureBaseFontAndResets(css, scope) {
+  const rootRe = new RegExp(`${escapeReg(scope)}\\s*\\{[\\s\\S]*?\\}`, "i");
+  if (!rootRe.test(css)) {
+    css = `${scope}{ font:13px/1.25 system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif; color:#374151; }\n` + css;
+  }
+  // Button UA reset inside scope if we have any buttons:
+  if (/\bbutton\b/i.test(css) && !new RegExp(`${escapeReg(scope)}[\\s\\S]*button[\\s\\S]*appearance`, "i").test(css)) {
+    css += `\n${scope} button{appearance:none;-webkit-appearance:none;background:transparent;border:0;font:inherit;color:inherit}`;
+  }
+  return css;
+}
+
 function enforceScope(inputCss = "", scope = ".comp") {
   let css = cssOnly(inputCss);
   css = css.replace(/(^|})\s*([^@}{]+?)\s*\{/g, (m, p1, selectors) => {
@@ -397,162 +440,96 @@ function enforceScope(inputCss = "", scope = ".comp") {
   return css.trim();
 }
 
-/** Heuristic CSS repair */
 function autofixCss(css = "") {
   let out = cssOnly(css);
-  out = out.replace(/\/\*+\s*START_CSS\s*\*+\//gi, "");
-  out = out.replace(/,\s*(;|\})/g, "$1"); // trailing commas
-  out = out.replace(/(box-shadow\s*:\s*)([^;]+);/gi, (m, p, val) => {
-    const cleaned = val.split(/\s*,\s*/).filter(layer => !/rgba?\([^)]*,\s*0(?:\.0+)?\)/i.test(layer)).join(", ");
-    return `${p}${cleaned};`;
-  });
-  out = out.replace(/([^;\{\}\s])\s*\}/g, "$1; }");
+  out = out.replace(/,\s*(;|\})/g, "$1");                  // trailing commas
+  out = out.replace(/([^;\{\}\s])\s*\}/g, "$1; }");        // missing semis
   const open = (out.match(/\{/g) || []).length;
   const close = (out.match(/\}/g) || []).length;
   if (open > close) out += "}".repeat(open - close);
   return out.trim();
 }
 
-function flattenGradients(css = "", solid = "") {
-  const color = solid && /^#|rgb|hsl|var\(/i.test(solid) ? solid : null;
-  let out = css.replace(/background-image\s*:\s*linear-gradient\([^;]+;/gi, m => color ? `background-color: ${color};` : m);
-  out = out.replace(/background\s*:\s*linear-gradient\([^;]+;/gi, m => color ? `background-color: ${color};` : m);
-  return out;
-}
-
-function minifyCss(css = "") {
-  return css
-    .replace(/\s*\/\*[\s\S]*?\*\/\s*/g, "")
-    .replace(/\s*([\{\}:;,])\s*/g, "$1")
-    .replace(/;}/g, "}")
-    .trim();
-}
-
-/* Build HTML purely from CSS when hints are missing */
-function buildHtmlFromCss(css, scope) {
-  const className = getScopeClass(scope);
-  const need = {
-    inputGeneric: /(^|[^\w-])input(\b|[\s\[#.:>{,])/i.test(css),
-    inputText: /\binput\[type\s*=\s*["']?text["']?\]/i.test(css),
-    inputEmail: /\binput\[type\s*=\s*["']?email["']?\]/i.test(css),
-    inputSearch: /\binput\[type\s*=\s*["']?search["']?\]/i.test(css),
-    textarea: /\btextarea\b/i.test(css),
-    select: /\bselect\b/i.test(css),
-    button: /\bbutton\b/i.test(css),
-    a: /\ba\b/i.test(css),
-    label: /\blabel\b/i.test(css),
-    img: /\bimg\b/i.test(css)
-  };
-
-  const parts = [];
-  if (need.label) parts.push(`<span class="seg label">Label</span>`);
-  if (need.inputText || need.inputGeneric) parts.push(`<input type="text" placeholder="Enter text">`);
-  if (need.inputEmail) parts.push(`<input type="email" placeholder="name@example.com">`);
-  if (need.inputSearch) parts.push(`<input type="search" placeholder="Search">`);
-  if (need.textarea) parts.push(`<textarea rows="3" placeholder="Type here"></textarea>`);
-  if (need.select) parts.push(`<select><option>One</option><option>Two</option></select>`);
-  if (need.img) parts.push(`<img alt="preview" src="https://dummyimage.com/80x48/ddd/999.png&text=img">`);
-  if (need.a) parts.push(`<a href="#">Link</a>`);
-  if (need.button) parts.push(`<button>Submit</button>`);
-  if (!parts.length) parts.push(`Button`);
-
-  return `<div class="${className}">\n  ${parts.join("\n  ")}\n</div>`;
-}
-
-/* Build HTML using segmented-control hints when available */
-function buildHtmlFromHints(hints, scope) {
-  const className = getScopeClass(scope);
-  const segs = Array.isArray(hints?.segments) ? hints.segments.filter(s => s.text) : [];
-  if (!segs.length) return "";
-
-  // Split into two chips if we detect a "compare" style token later in the list
-  let splitIdx = segs.findIndex(s => /compare/i.test(s.text));
-  if (splitIdx < 0) splitIdx = Number.MAX_SAFE_INTEGER;
-
-  const groups = [segs.slice(0, splitIdx), segs.slice(splitIdx)].filter(g => g.length);
-
-  const htmlGroups = groups.map(group => {
-    const parts = [];
-    group.forEach((s, i) => {
-      // divider between items
-      if (i > 0) parts.push(`<span class="divider"></span>`);
-      const caretClass = s.caret ? " has-caret" : "";
-      const safe = escapeHtml(s.text);
-      if (s.role === "label") {
-        parts.push(`<span class="seg label">${safe}</span>`);
-      } else if (s.role === "link") {
-        parts.push(`<a class="seg link${caretClass}" href="#">${safe}</a>`);
-      } else if (s.role === "toggle" || s.role === "value" || s.role === "dropdown" || s.role === "unknown") {
-        // Optional dot before “Compare”
-        const dot = s.dot ? `<span class="seg dot" aria-hidden="true"></span>` : "";
-        parts.push(`${dot}<button class="seg value${caretClass}">${safe}</button>`);
-      } else {
-        parts.push(`<span class="seg">${safe}</span>`);
-      }
-    });
-    return `<div class="chip">\n  ${parts.join("\n  ")}\n</div>`;
-  });
-
-  return `<div class="${className}">\n${htmlGroups.join("\n")}\n</div>`;
-}
-
-async function suggestHtml({ baseModel, image, css, scope, component, hints, callOnce }) {
-  try {
-    const html = await callOnce("html", { model: baseModel, image, css, scope, component, hints });
-    return htmlOnly(html);
-  } catch {
-    return "";
-  }
+function cssOnly(text = "") { return String(text).replace(/^```(?:css)?\s*/i, "").replace(/```$/i, "").trim(); }
+function htmlOnly(s = "") { return String(s).replace(/^```(?:html)?\s*/i, "").replace(/```$/i, "").trim(); }
+function safeParseJson(raw = "{}") {
+  try { return JSON.parse(raw); } catch {}
+  const m = String(raw).match(/\{[\s\S]*\}$/);
+  if (m) { try { return JSON.parse(m[0]); } catch {} }
+  return {};
 }
 
 function ensureScopedHtml(html, scope) {
   const className = getScopeClass(scope);
   const rootRe = new RegExp(`<([a-z0-9-]+)([^>]*class=["'][^"']*${escapeReg(className)}[^"']*["'][^>]*)>`, "i");
-  if (rootRe.test(html)) return html.trim();
-  return `<div class="${className}">\n${html.trim()}\n</div>`;
+  if (rootRe.test(html)) return htmlOnly(html);
+  return `<div class="${className}">\n${htmlOnly(html)}\n</div>`;
 }
 
-/* Ensure HTML contains elements that CSS styles (fallback safety) */
-function ensureHtmlCoversCss(html, css, hints, scope) {
-  let out = html.trim();
-  const hasInputCSS = /(^|[^\w-])input(\b|[\s\[#.:>{,])/i.test(css);
-  const hasButtonCSS = /\bbutton\b/i.test(css);
-  const hasInputHTML = /<input\b/i.test(out);
-  const hasButtonHTML = /<button\b/i.test(out);
-
-  if (hasInputCSS && !hasInputHTML) {
-    out = out.replace(/(<\/[a-z0-9-]+>\s*)$/i, `  <input type="text" placeholder="${escapeHtml(hints?.input_placeholder || 'Enter text')}">\n$1`);
-  }
-  if (hasButtonCSS && !hasButtonHTML) {
-    out = out.replace(/(<\/[a-z0-9-]+>\s*)$/i, `  <button>${escapeHtml(hints?.button_text || 'Submit')}</button>\n$1`);
-  }
-  return out;
+function normalizeSpec(s = {}) {
+  const def = (v, d) => (v === undefined || v === null ? d : v);
+  return {
+    type: s.type || "unknown",
+    text: s.text || "",
+    items: Array.isArray(s.items) ? s.items : [],
+    html_hint: s.html_hint || "div",
+    font: {
+      family_hint: s.font?.family_hint || 'system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif',
+      size_px: def(s.font?.size_px, 14),
+      weight: s.font?.weight || "600",
+      transform: s.font?.transform || "none",
+      letter_spacing: def(s.font?.letter_spacing, 0)
+    },
+    colors: {
+      text: colorOr(s.colors?.text) || "#374151",
+      muted: colorOr(s.colors?.muted) || "#6b7280",
+      link: colorOr(s.colors?.link) || "#2563eb",
+      bg: colorOr(s.colors?.bg) || "#ffffff",
+      border: colorOr(s.colors?.border) || "#e5e7eb",
+      divider: colorOr(s.colors?.divider) || "#e5e7eb"
+    },
+    border: {
+      width_px: n(s.border?.width_px ?? 1),
+      style: s.border?.style || "solid",
+      color: colorOr(s.border?.color) || "#e5e7eb",
+      radius_px: n(s.border?.radius_px ?? 8)
+    },
+    padding: {
+      t: n(s.padding?.t ?? 8),
+      r: n(s.padding?.r ?? 12),
+      b: n(s.padding?.b ?? 8),
+      l: n(s.padding?.l ?? 12)
+    },
+    background: s.background || { kind:"solid", color:"#ffffff" },
+    shadow: Array.isArray(s.shadow) ? s.shadow : []
+  };
 }
 
-function applyTextHints(html, hints) {
-  if (!hints) return html;
-  let out = html;
-
-  if (hints.button_text) {
-    out = out.replace(/(<button[^>]*>)([\s\S]*?)(<\/button>)/i, (_, a, _txt, c) => `${a}${escapeHtml(hints.button_text)}${c}`);
-  }
-  if (hints.input_placeholder) {
-    out = out.replace(/(<input\b[^>]*)(placeholder=["'][^"']*["'])?/i, (m, head, ph) => {
-      if (/placeholder=/i.test(m)) {
-        return m.replace(/placeholder=["'][^"']*["']/i, `placeholder="${escapeHtml(hints.input_placeholder)}"`);
-      }
-      return `${head} placeholder="${escapeHtml(hints.input_placeholder)}"`;
-    });
-  }
-  return out;
-}
-
-function getScopeClass(scope = ".comp") { return String(scope || ".comp").trim().replace(/^\./, ""); }
+/* tiny helpers */
+function n(v){ const x = Number(v); return Number.isFinite(x) ? x : 0; }
+function px(v){ return `${Math.max(0, Math.round(Number(v)||0))}px`; }
+function colorOr(c){ return (typeof c === "string" && c.trim()) ? c.trim() : ""; }
+function rgbaOr(v){ return (typeof v === "string" && /rgba?\(/i.test(v)) ? v : ""; }
+function cssWeight(w){ return /^\d+$/.test(w||"") ? w : (String(w||"").toLowerCase().includes("bold") ? "700" : "600"); }
+function getScopeClass(scope=".comp"){ return String(scope).trim().replace(/^\./,""); }
+function escapeHtml(s=""){ return String(s).replace(/[&<>"']/g, m=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[m])); }
 function escapeReg(s){ return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
-function escapeHtml(s=""){ return String(s).replace(/[&<>"']/g, m=>({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[m])); }
-function fallbackInner(componentHint = "component") {
-  if (/input|field/i.test(componentHint)) return `<input type="text" placeholder="Enter text">`;
-  if (/link|anchor/i.test(componentHint)) return `<a href="#">Link</a>`;
-  if (/card/i.test(componentHint)) return `<div class="item"><h4>Title</h4><p>Body</p><button>Action</button></div>`;
-  return `<button>Submit</button>`;
+function shade(hex,delta){ // quick adjust
+  let m = (hex||"").match(/^#?([0-9a-f]{6})$/i); if(!m) return hex||"#2563eb";
+  let n = parseInt(m[1],16), r=(n>>16)&255,g=(n>>8)&255,b=n&255;
+  const adj = (x)=>Math.max(0,Math.min(255, Math.round(x + (delta/100)*255)));
+  return "#"+[adj(r),adj(g),adj(b)].map(x=>x.toString(16).padStart(2,"0")).join("");
+}
+function inferInputTypeFromColors(/*spec*/){ return "text"; }
+function extractErrMsg(err){
+  if (err?.response?.data) {
+    try { return JSON.stringify(err.response.data); } catch {}
+    return String(err.response.data);
+  }
+  return String(err?.message || err);
+}
+function sendError(res, status, error, details){
+  const out = { error: String(error || "Unknown") };
+  if (details) out.details = String(details);
+  res.status(status).json(out);
 }
