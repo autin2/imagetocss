@@ -4,18 +4,17 @@
 
 import OpenAI from "openai";
 
-/* ---------- Model selection ---------- */
-const MODEL_CHAIN = [
-  process.env.OPENAI_MODEL,      // optional override via env
+/* ---------- Model order & helpers ---------- */
+const MODEL_ORDER = [
+  process.env.OPENAI_MODEL,     // optional override
   "gpt-5",
   "gpt-5-mini",
   "gpt-4o",
   "gpt-4o-mini",
 ].filter(Boolean);
 
-const FALLBACK_MODEL = "gpt-4o-mini";
 const isGpt5 = (m) => /^gpt-5(\b|-)/i.test(m);
-const supportsVision = (m) => /gpt-4o(?:-mini)?$/i.test(m);
+const supportsChatVision = (m) => /gpt-4o(?:-mini)?$/i.test(m);
 
 /* ---------- HTTP handler ---------- */
 export default async function handler(req, res) {
@@ -49,137 +48,126 @@ export default async function handler(req, res) {
     }
 
     const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-    const chosenModel = await resolveUsableModel(client);
 
     // ---- Pass 1: general spec
-    let spec = await getStyleSpec(client, chosenModel, { image, scope, component });
+    let { spec, usedModel } = await fetchSpecWithFallback(client, {
+      image, scope, component, forceSegmented: false
+    });
 
     // ---- Pass 2 (only if needed): force segmented groups
     if (!isSegmentedWithGroups(spec)) {
-      const forced = await getSegmentedSpec(client, chosenModel, { image, scope, component });
-      if (isSegmentedWithGroups(forced)) spec = forced;
-      else spec = repairSegmented(spec); // heuristic repair (last resort)
+      const forced = await fetchSpecWithFallback(client, {
+        image, scope, component, forceSegmented: true
+      });
+      if (isSegmentedWithGroups(forced.spec)) {
+        spec = forced.spec;
+        usedModel = forced.usedModel;
+      } else {
+        spec = repairSegmented(spec); // heuristic last resort
+      }
     }
 
     // ---- Codegen
     const { css: rawCss, html: rawHtml, notes } = codegen(spec, { scope, force_solid, solid_color });
-
     let css = enforceScope(rawCss, scope);
     css = prettyCss(autofixCss(css));
     css = ensureBaseFontAndResets(css, scope);
-
-    let html = ensureScopedHtml(rawHtml, scope);
+    const html = ensureScopedHtml(rawHtml, scope);
 
     if (!css.trim()) return sendError(res, 502, "Model returned empty CSS spec");
 
     res.setHeader("Cache-Control", "no-store");
     return res.status(200).json({
-      css, html, spec, notes, scope, component, used_model: chosenModel,
-      ...(debug ? { debug: { model_chain: MODEL_CHAIN } } : {})
+      css, html, spec, notes, scope, component, used_model: usedModel,
+      ...(debug ? { debug: { model_order: MODEL_ORDER } } : {})
     });
   } catch (err) {
     return sendError(res, 500, "Failed to generate CSS.", extractErrMsg(err));
   }
 }
 
-/* ---------- OpenAI glue ---------- */
+/* ---------- Spec fetching with graceful fallbacks ---------- */
 
-async function resolveUsableModel(client) {
-  for (const m of (MODEL_CHAIN.length ? MODEL_CHAIN : [FALLBACK_MODEL])) {
+async function fetchSpecWithFallback(client, { image, scope, component, forceSegmented }) {
+  let lastErr;
+  for (const model of MODEL_ORDER) {
     try {
-      const params = isGpt5(m) ? { max_completion_tokens: 16 } : { max_tokens: 16 };
-      await client.chat.completions.create({
-        model: m,
-        messages: [{ role: "user", content: "ping" }],
-        ...params
-      });
-      return m;
+      const spec = await getStyleSpec(client, model, { image, scope, component, forceSegmented });
+      return { spec, usedModel: model };
     } catch (e) {
-      const msg = String(e?.message || "");
-      const soft = e?.status === 404 || /does not exist|unsupported|unknown/i.test(msg);
-      if (!soft) throw e;
+      lastErr = e;
+      // Try next model on any model/endpoint capability error
+      continue;
     }
   }
-  return FALLBACK_MODEL;
+  throw lastErr || new Error("No usable model");
 }
 
-async function getStyleSpec(client, model, { image, scope, component }) {
-  const useModel = supportsVision(model) ? model : "gpt-4o";
-  const sys =
-    "You are a UI vision measurer. Return STRICT JSON describing the component(s). " +
-    "If you see a pill/segmented control with multiple rounded capsules, return type:'segmented' WITH groups[]. " +
-    "Each group corresponds to one rounded capsule. Inside each group, items[] appear left→right. " +
-    "For every item, include: role ('label'|'value'|'link'|'dropdown'|'action'|'icon'|'divider'), text (verbatim), " +
-    "caret (bool), icon_x (bool), active (bool). For banners/containers, use type:'banner'. No markdown, JSON only.";
-
+async function getStyleSpec(client, model, { image, scope, component, forceSegmented }) {
   const schema = baseSchema();
+  const baseGuidelines =
+    "Return STRICT JSON describing the component(s). " +
+    "If you see a pill/segmented control with multiple rounded capsules, return type:'segmented' WITH groups[]. " +
+    "Each group corresponds to one rounded capsule. Items are left→right with role/text/caret/icon_x/active. " +
+    "Extract EVERY visible text verbatim. No markdown—JSON only.";
+
+  const segmentedGuidelines =
+    "If the image plausibly shows 2+ rounded capsules, you MUST return type:'segmented' with groups[]. " +
+    "Each group is one capsule; inside, list items[] with role/text/caret/icon_x/active.";
+
+  const sys = (forceSegmented ? segmentedGuidelines : baseGuidelines);
   const usr = [
     `SCOPE: ${scope}`,
     `COMPONENT HINT: ${component}`,
     "Return ONLY JSON matching this schema:",
-    JSON.stringify(schema),
-    "",
-    "Guidelines:",
-    "- Extract EVERY visible text fragment; do not summarize.",
-    "- If you see multiple rounded capsules (chips), you MUST produce type:'segmented' with groups[].",
-    "- Use role:'link' for blue link-like text; set caret:true for ▼/▾/chevron.",
-    "- Use icon_x:true for an encircled × preceding text."
-  ].join("\n");
-
-  const params = isGpt5(useModel)
-    ? { max_completion_tokens: 1200 }
-    : { max_tokens: 1200, temperature: 0.1 };
-
-  const r = await client.chat.completions.create({
-    model: useModel,
-    messages: [
-      { role: "system", content: sys },
-      { role: "user", content: [
-          { type: "text", text: usr },
-          { type: "image_url", image_url: { url: image, detail: "high" } }
-      ] }
-    ],
-    ...params
-  });
-
-  const raw = r?.choices?.[0]?.message?.content || "{}";
-  return safeParseJson(raw);
-}
-
-async function getSegmentedSpec(client, model, { image, scope, component }) {
-  // Stronger instruction that *forces* segmented groups if visually plausible.
-  const useModel = supportsVision(model) ? model : "gpt-4o";
-  const sys =
-    "Return STRICT JSON for a SEGMENTED control made of multiple rounded chips if present. " +
-    "Prefer type:'segmented' with groups[] unless it is clearly a single, non-segmented component. " +
-    "Each group is one rounded capsule. In each group, list items[] with role/text/caret/icon_x/active. No markdown.";
-  const schema = baseSchema();
-
-  const usr = [
-    `SCOPE: ${scope}`,
-    `COMPONENT HINT: ${component}`,
-    "Force segmented recognition if you see 2+ rounded capsules:",
     JSON.stringify(schema)
   ].join("\n");
 
-  const params = isGpt5(useModel)
-    ? { max_completion_tokens: 900 }
-    : { max_tokens: 900, temperature: 0.1 };
+  if (isGpt5(model)) {
+    // ---- Responses API (GPT-5 family)
+    const r = await client.responses.create({
+      model,
+      max_output_tokens: 1200,
+      input: [
+        {
+          role: "user",
+          content: [
+            { type: "input_text", text: sys + "\n\n" + usr },
+            { type: "input_image", image_url: { url: image, detail: "high" } },
+          ],
+        },
+      ],
+    });
+    const raw = r?.output_text || "";
+    const spec = safeParseJson(raw);
+    if (!spec || typeof spec !== "object") throw new Error("Empty/invalid JSON (responses)");
+    return spec;
+  }
 
-  const r = await client.chat.completions.create({
-    model: useModel,
-    messages: [
-      { role: "system", content: sys },
-      { role: "user", content: [
-          { type: "text", text: usr },
-          { type: "image_url", image_url: { url: image, detail: "high" } }
-      ] }
-    ],
-    ...params
-  });
+  if (supportsChatVision(model)) {
+    // ---- Chat Completions (GPT-4o family)
+    const r = await client.chat.completions.create({
+      model,
+      temperature: 0.1,
+      max_tokens: 1200,
+      messages: [
+        { role: "system", content: sys },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: usr },
+            { type: "image_url", image_url: { url: image, detail: "high" } },
+          ],
+        },
+      ],
+    });
+    const raw = r?.choices?.[0]?.message?.content || "";
+    const spec = safeParseJson(raw);
+    if (!spec || typeof spec !== "object") throw new Error("Empty/invalid JSON (chat)");
+    return spec;
+  }
 
-  const raw = r?.choices?.[0]?.message?.content || "{}";
-  return safeParseJson(raw);
+  throw new Error(`Model '${model}' unsupported for vision`);
 }
 
 /* ---------- Schema & checks ---------- */
@@ -249,20 +237,17 @@ function isSegmentedWithGroups(spec) {
 }
 
 /* ---------- Heuristic segmented repair (last resort) ---------- */
-
 function repairSegmented(spec) {
   if (!spec || (spec.type !== "segmented" && spec.type !== "chip" && spec.type !== "container" && spec.type !== "banner" && spec.type !== "unknown")) {
     return spec;
   }
   const s = { ...spec };
-  // If groups missing but flat items exist, wrap them as one group.
   if ((!s.groups || !s.groups.length) && Array.isArray(s.items) && s.items.length) {
     s.type = "segmented";
     s.groups = [{ items: normalizeSegItems(s.items) }];
   }
   return s;
 }
-
 function normalizeSegItems(items) {
   return (items || []).map(it => ({
     role: it.role || "value",
@@ -273,8 +258,7 @@ function normalizeSegItems(items) {
   }));
 }
 
-/* ---------- Codegen ---------- */
-
+/* ---------- Code generation ---------- */
 function codegen(spec, opts) {
   const scope = opts?.scope || ".comp";
   const s = normalizeSpec(spec);
@@ -286,8 +270,7 @@ function codegen(spec, opts) {
     return codegenBanner(s, opts);
   }
 
-  // Fallbacks (button/input/simple chip)
-  const baseFont = `font: ${px(s.font.size_px || 14)}/${1.25} ${s.font.family_hint || 'system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif'};`;
+  const baseFont = `font: ${px(s.font.size_px || 14)}/${1.25} ${s.font.family_hint || 'system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif'};`
   const textColor = s.colors.text || "#374151";
   const bg = buildBackground(s.background, opts);
   const border = `${px(s.border.width_px || 1)} ${s.border.style || "solid"} ${s.border.color || "#e5e7eb"}`;
@@ -330,7 +313,7 @@ ${scope} input[type="text"]:focus{ border-color:${s.colors.border || "#9ca3af"};
     return { css, html, notes };
   }
 
-  // Generic block (last fallback)
+  // Generic block
   css = `
 ${scope}{ ${baseFont} color:${textColor}; }
 ${scope} .block{ ${bg} color:${textColor}; border:${border}; border-radius:${radius}; padding:${padding}; ${boxShadow} }
@@ -454,7 +437,7 @@ ${scope} .icon::before{ content:"i"; font-weight:700; }
   return { css, html, notes: "Composite banner generated." };
 }
 
-/* ---------- Build helpers ---------- */
+/* ---------- Builders & utils ---------- */
 
 function buildBackground(bg, opts) {
   if (!bg || bg.kind === "transparent") return "";
@@ -462,9 +445,7 @@ function buildBackground(bg, opts) {
     const solid = colorOr(bg.color) || opts.solid_color || "#ffffff";
     return `background-color:${solid};`;
   }
-  if (bg.kind === "solid") {
-    return `background-color:${colorOr(bg.color) || "#ffffff"};`;
-  }
+  if (bg.kind === "solid") return `background-color:${colorOr(bg.color) || "#ffffff"};`;
   if (bg.kind === "gradient" && bg.gradient?.stops?.length) {
     const dir = bg.gradient.direction || "to bottom";
     const stops = bg.gradient.stops
@@ -474,7 +455,6 @@ function buildBackground(bg, opts) {
   }
   return `background-color:${colorOr(bg.color) || "#ffffff"};`;
 }
-
 function buildShadow(sh) {
   if (!Array.isArray(sh) || !sh.length) return "";
   const layers = sh
@@ -483,8 +463,7 @@ function buildShadow(sh) {
   return `box-shadow:${layers};`;
 }
 
-/* ---------- Utilities ---------- */
-
+/* Formatting & sanitizer */
 function ensureBaseFontAndResets(css, scope) {
   const rootRe = new RegExp(`${escapeReg(scope)}\\s*\\{[\\s\\S]*?\\}`, "i");
   if (!rootRe.test(css)) {
@@ -495,7 +474,6 @@ function ensureBaseFontAndResets(css, scope) {
   }
   return css;
 }
-
 function enforceScope(inputCss = "", scope = ".comp") {
   let css = cssOnly(inputCss);
   css = css.replace(/(^|})\s*([^@}{]+?)\s*\{/g, (m, p1, selectors) => {
@@ -508,7 +486,6 @@ function enforceScope(inputCss = "", scope = ".comp") {
   });
   return css.trim();
 }
-
 function autofixCss(css = "") {
   let out = cssOnly(css);
   out = out.replace(/,\s*(;|\})/g, "$1");
@@ -518,7 +495,6 @@ function autofixCss(css = "") {
   if (open > close) out += "}".repeat(open - close);
   return out.trim();
 }
-
 function prettyCss(css) {
   return css
     .replace(/\}\s*/g, "}\n")
@@ -528,6 +504,7 @@ function prettyCss(css) {
     .trim();
 }
 
+/* Parse & normalize */
 function cssOnly(text = "") { return String(text).replace(/^```(?:css)?\s*/i, "").replace(/```$/i, "").trim(); }
 function htmlOnly(s = "") { return String(s).replace(/^```(?:html)?\s*/i, "").replace(/```$/i, "").trim(); }
 function safeParseJson(raw = "{}") {
@@ -536,14 +513,13 @@ function safeParseJson(raw = "{}") {
   if (m) { try { return JSON.parse(m[0]); } catch {} }
   return {};
 }
-
 function ensureScopedHtml(html, scope) {
   const className = getScopeClass(scope);
   const rootRe = new RegExp(`<([a-z0-9-]+)([^>]*class=["'][^"']*${escapeReg(className)}[^"']*["'][^>]*)>`, "i");
   if (rootRe.test(html)) return htmlOnly(html);
-  return `<div class="${className}">\n${htmlOnly(html)}\n</div>`;
+  const inner = htmlOnly(html) || `<div class="block">Component</div>`;
+  return `<div class="${className}">\n${inner}\n</div>`;
 }
-
 function normalizeSpec(s = {}) {
   const def = (v, d) => (v === undefined || v === null ? d : v);
   return {
@@ -581,11 +557,6 @@ function normalizeSpec(s = {}) {
     background: s.background || { kind:"solid", color:"#ffffff" },
     shadow: Array.isArray(s.shadow) ? s.shadow : []
   };
-}
-
-function findChildText(arr, kind) {
-  const it = (arr||[]).find(x => x.kind === kind);
-  return it?.text || "";
 }
 
 /* tiny helpers */
