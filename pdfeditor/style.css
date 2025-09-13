@@ -37,8 +37,8 @@ body{
 .brand-mark{width:28px;height:28px;border-radius:8px;background:var(--ink)}
 .brand b{font-weight:800;letter-spacing:.2px}
 .links{display:flex;gap:10px;align-items:center}
-.links a{color:var(--muted);text-decoration:none;padding:8px 10px;border-radius:10px}
-.links a:hover{color:var(--ink);background:#f2f4f7}
+.links a, .links button{color:var(--muted);text-decoration:none;padding:8px 10px;border-radius:10px;background:none;border:0;cursor:pointer}
+.links a:hover, .links button:hover{color:var(--ink);background:#f2f4f7}
 
 /* Buttons */
 .btn{appearance:none;border:1px solid var(--border);background:#fff;color:var(--ink);
@@ -95,9 +95,9 @@ h1{font-size:38px;line-height:1.15;margin:6px 0 10px}
 /* Map generated tokens to the demo (so the card reflects :root variables) */
 .token-card{
   --d-bg: var(--paper);
-  --d-ink: var(--color-2, #0f172a);      /* text color */
-  --d-accent: var(--color-1, #0ea5e9);   /* button/bg accent */
-  --d-border: var(--color-3, #e5e7eb);   /* border highlight */
+  --d-ink: var(--color-2, #0f172a);
+  --d-accent: var(--color-1, #0ea5e9);
+  --d-border: var(--color-3, #e5e7eb);
 }
 
 /* Code block */
@@ -142,24 +142,19 @@ h1{font-size:38px;line-height:1.15;margin:6px 0 10px}
 /* App-specific additions */
 /* ===================== */
 
-/* Fixed app columns; prevent content from growing grid width */
 .app-grid{ display:grid; grid-template-columns:360px minmax(0,1fr); gap:20px; align-items:start; }
 @media (max-width:980px){ .app-grid{ grid-template-columns:1fr } }
 
-/* Panels with fixed height; allow internal scroll */
 .app-panel{ height:560px; display:flex; flex-direction:column; min-width:0; }
 .app-panel .code#output{ flex:1 1 auto; height:auto; min-height:180px; }
 #errors{ height:120px; border-color:rgba(239,68,68,.35); color:#ffe1e1; background:#2a0b0b; }
 
-/* Make the snip-frame fill panel height and center content */
 .app-panel .snip-frame{ height:100%; display:grid; place-items:center; }
 
-/* Toggle image/empty states inside snip-frame */
 .snip-frame .preview-img{ display:none; max-width:100%; max-height:100%; object-fit:contain; }
 .snip-frame.has-image .preview-img{ display:block; }
 .snip-frame.has-image .drop-inner{ display:none; }
 
-/* Hover overlay to change the photo (only when image selected) */
 .overlay{
   position:absolute; inset:12px;
   display:grid; place-items:center;
@@ -171,14 +166,12 @@ h1{font-size:38px;line-height:1.15;margin:6px 0 10px}
 .snip-frame.has-image:hover .overlay,
 .snip-frame.has-image:focus-within .overlay{ opacity:1; pointer-events:auto; }
 
-/* Code area: never expand grid width; scroll long lines */
 .code{ max-width:100%; overflow-x:auto; }
 
-/* Controls row & API pill (aligned with buttons, no wrap) */
 .controls{ display:flex; gap:10px; align-items:center; flex-wrap:nowrap; min-width:0; }
 .controls .spacer{ flex:1 1 auto; min-width:0; }
 #statusLead{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.controls .btn{ min-height:44px; }              /* normalized height */
+.controls .btn{ min-height:44px; }
 .api-pill{
   display:inline-flex; align-items:center; gap:6px;
   padding:10px 12px; line-height:1.55; white-space:nowrap;
@@ -188,9 +181,6 @@ h1{font-size:38px;line-height:1.15;margin:6px 0 10px}
 }
 .api-pill b{ font-weight:800; }
 
-/* ================== */
-/* Global loading UI  */
-/* ================== */
 .loading-scrim{
   position:fixed; inset:0; z-index:9999;
   background:rgba(15,23,42,.42); backdrop-filter:blur(3px);
@@ -212,3 +202,63 @@ h1{font-size:38px;line-height:1.15;margin:6px 0 10px}
   animation: spin .9s linear infinite;
 }
 @keyframes spin{ to{ transform: rotate(360deg) } }
+
+/* ================ */
+/* Auth Modal UI    */
+/* ================ */
+
+.modal{
+  position:fixed; inset:0; z-index:1000;
+  display:none; align-items:center; justify-content:center;
+}
+.modal.open{ display:flex; }
+.modal__scrim{
+  position:absolute; inset:0; background:rgba(2,6,23,.45); backdrop-filter: blur(2px);
+}
+.modal__dialog{
+  position:relative; z-index:1;
+  width:100%; max-width: 420px;
+  background:var(--paper); color:var(--ink);
+  border:1px solid var(--border); border-radius:16px;
+  box-shadow: var(--shadow);
+  padding: 18px;
+}
+.modal__close{
+  position:absolute; top:8px; right:10px;
+  width:32px; height:32px; border-radius:8px;
+  border:1px solid var(--border); background:#fff; cursor:pointer;
+  font-size:18px; line-height:1;
+}
+.modal__close:hover{ background:#f7f8fa; }
+.modal__header h2{ margin:4px 0 6px; font-size:22px; }
+.modal__desc{ color:var(--muted); margin:0 0 12px; }
+
+/* Tabs */
+.modal__tabs{ display:flex; gap:8px; margin-bottom:12px; }
+.tab{
+  appearance:none; border:1px solid var(--border); background:#fff; color:var(--muted);
+  padding:8px 10px; border-radius:10px; font-weight:700; cursor:pointer;
+}
+.tab.is-active{ color:var(--ink); background:#f7f8fa; border-color:#dfe3ea; }
+
+/* Form */
+.form{ display:grid; gap:10px; }
+.label{ font-size:13px; color:var(--muted); font-weight:700; }
+.input{
+  width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:10px;
+  background:#fff; outline:none;
+}
+.input:focus{ border-color:#c5c9d1; box-shadow:0 0 0 2px rgba(14,165,233,.18); }
+.row{ display:flex; gap:10px; align-items:end; }
+.row-end{ margin-left:auto; }
+.link{ color:#0b3b4f; text-decoration:none; font-weight:700; }
+.link:hover{ text-decoration:underline; }
+.or{ display:flex; align-items:center; gap:14px; margin:10px 0; color:var(--muted); }
+.or::before, .or::after{ content:""; height:1px; flex:1; background:var(--border); }
+
+/* Google button */
+.btn.google{
+  display:inline-flex; align-items:center; gap:10px;
+  border-color:#dfe3ea; background:#fff; color:#1f2937;
+}
+.btn.google:hover{ background:#f7f8fa; }
