@@ -11,7 +11,7 @@
     body.is-app { overflow:auto; }
     .wrap { max-width: 1200px; margin: 28px auto; padding: 0 18px; }
 
-    .two { display:grid; grid-template-columns: 1.05fr .95fr; gap: 18px; }
+    .two { display:grid; grid-template-columns: 1.05fr .95fr; gap: 18px; align-items:start; } /* no stretching */
     @media (max-width: 980px){ .two { grid-template-columns: 1fr; } }
 
     .panel { background: var(--paper); border:1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
@@ -20,14 +20,18 @@
 
     .drop {
       position: relative; border: 2px dashed var(--border); border-radius: 12px; background: #fff;
-      min-height: 320px; display:grid; place-items:center; text-align:center;
-      transition: background .2s ease, border-color .2s ease;
+      min-height: 260px; display:grid; place-items:center; text-align:center;
+      transition: background .2s ease, border-color .2s ease, min-height .2s ease;
     }
     .drop.drag { border-color: var(--accent); background: #f0fbff; }
     .drop img.preview { max-width: 100%; max-height: 100%; border-radius: 10px; display: none; }
-    .drop.has-img img.preview { display: block; }
     .drop .empty { color: var(--muted); }
     .drop .btnrow { margin-top: 10px; display:flex; gap:10px; justify-content:center; }
+
+    /* When an image exists: show image, hide empty overlay, let box shrink to content */
+    .drop.has-img img.preview { display: block; }
+    .drop.has-img .empty { display: none; }
+    .drop.has-img { min-height: auto; }
 
     /* Hover overlay to change image (only when an image exists) */
     .change-overlay {
@@ -40,7 +44,7 @@
     .change-overlay .btn { background: #fff; }
 
     /* Form row */
-    .formgrid { display:grid; grid-template-columns: 1fr 1fr auto; gap:12px; align-items:end; margin-top:12px; }
+    .formgrid { display:grid; grid-template-columns: 1fr auto; gap:12px; align-items:end; margin-top:12px; }
     @media (max-width: 720px){ .formgrid { grid-template-columns: 1fr; } }
 
     .input { width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:10px; background:#fff; outline:none; }
@@ -49,7 +53,7 @@
     /* Output code areas (fixed heights so layout doesn't jump) */
     .codebox { position:relative; }
     .codebox .copy { position:absolute; top:10px; right:10px; }
-    .code { height: 360px; white-space: pre; tab-size: 2; } /* keep panel height stable */
+    .code { height: 360px; white-space: pre; tab-size: 2; }
 
     /* Loading overlay */
     .loading {
@@ -76,7 +80,7 @@
 
     <div class="two">
       <!-- LEFT: input -->
-      <section class="panel pad">
+      <section class="panel pad" style="align-self:start">
         <div class="drop" id="drop">
           <img id="preview" class="preview" alt="preview"/>
           <div class="change-overlay"><button class="btn">Change photo</button></div>
@@ -97,10 +101,7 @@
             <label class="label" for="scope">Scope class</label>
             <input id="scope" class="input" value=".comp" spellcheck="false"/>
           </div>
-          <div>
-            <label class="label" for="component">Component hint</label>
-            <input id="component" class="input" value="button" spellcheck="false"/>
-          </div>
+
           <div style="display:flex; gap:10px;">
             <button id="go" class="btn primary">Generate CSS</button>
             <button id="clear" class="btn">Clear</button>
@@ -142,7 +143,6 @@
     const imgStatus = document.getElementById('imgStatus');
 
     const scopeEl = document.getElementById('scope');
-    const compEl = document.getElementById('component');
     const goBtn = document.getElementById('go');
     const clearBtn = document.getElementById('clear');
 
@@ -221,13 +221,11 @@
     // ===== Pretty-printers =====
     function formatCSS(css) {
       if (!css) return "";
-      // Insert newlines around braces and after semicolons
       css = css
         .replace(/\s*{\s*/g, " {\n")
         .replace(/;\s*/g, ";\n")
         .replace(/\s*}\s*/g, "\n}\n")
         .replace(/\n{2,}/g, "\n");
-      // Indent by nesting level
       const lines = css.trim().split("\n");
       let depth = 0;
       const out = [];
@@ -242,7 +240,6 @@
 
     function formatHTML(html) {
       if (!html) return "";
-      // Add line breaks between tags, then indent
       const tokens = html
         .replace(/></g, ">\n<")
         .split("\n")
@@ -258,14 +255,12 @@
 
       for (let t of tokens) {
         const isClose = /^<\//.test(t);
-        const isOpen = /^<[^/!][^>]*?>$/.test(t) && !/\/>$/.test(t); // not self-closing
+        const isOpen = /^<[^/!][^>]*?>$/.test(t) && !/\/>$/.test(t);
         const tagMatch = t.match(/^<\/?([a-zA-Z0-9-]+)/);
         const tag = tagMatch ? tagMatch[1].toLowerCase() : null;
 
         if (isClose) depth = Math.max(0, depth - 1);
-
         out.push("  ".repeat(depth) + t);
-
         if (isOpen && tag && !voids.has(tag)) depth++;
       }
       return out.join("\n").trim();
@@ -275,7 +270,7 @@
     goBtn.addEventListener('click', async () => {
       if (!dataUrl) { alert("Select or paste an image first"); return; }
       const scope = scopeEl.value.trim() || ".comp";
-      const component = compEl.value.trim() || "component";
+      const component = ""; // removed from UI per request
 
       setLoading(true);
       setStatus("…");
@@ -304,7 +299,6 @@
           return;
         }
 
-        // ✅ Pretty print results
         const prettyCss = formatCSS(payload.css || "");
         const prettyHtml = formatHTML(payload.html || "");
 
