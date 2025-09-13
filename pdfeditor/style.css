@@ -37,12 +37,16 @@ body{
 .brand-mark{width:28px;height:28px;border-radius:8px;background:var(--ink)}
 .brand b{font-weight:800;letter-spacing:.2px}
 
-/* New nav layout: left cluster + right auth slot */
+/* === New nav layout: centered links + right auth slot === */
 .links{
-  display:flex; align-items:center; justify-content:space-between; gap:12px; flex:1;
+  position:relative;
+  display:flex; align-items:center; flex:1;
 }
-.nav-left{ display:flex; align-items:center; gap:10px; }
-.nav-auth{ display:flex; align-items:center; }
+.nav-center{
+  position:absolute; left:50%; transform:translateX(-50%);
+  display:flex; align-items:center; gap:10px;
+}
+.nav-auth{ margin-left:auto; display:flex; align-items:center; }
 
 /* Link/button base styles (work for buttons inside .links too) */
 .links a, .links button{
@@ -129,8 +133,8 @@ h1{font-size:38px;line-height:1.15;margin:6px 0 10px}
 /* Previewed image */
 .preview-img{max-width:100%;max-height:420px;border-radius:8px;display:block}
 
-/* Output header + copy button */
-.outputbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}
+/* Output header + copy button -->
+*/.outputbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}
 .outputbar .label{color:var(--muted);font-size:13px}
 
 /* Footer */
@@ -248,7 +252,7 @@ h1{font-size:38px;line-height:1.15;margin:6px 0 10px}
 /* Tabs */
 .modal__tabs{ display:flex; gap:8px; margin-bottom:12px; }
 .tab{
-  appearance:none; border:1px solid var(--border); background:#fff; color:var(--muted);
+  appearance:none; border:1px solid var(--border); background:#fff; color:#var(--muted);
   padding:8px 10px; border-radius:10px; font-weight:700; cursor:pointer;
 }
 .tab.is-active{ color:var(--ink); background:#f7f8fa; border-color:#dfe3ea; }
@@ -293,3 +297,9 @@ h1{font-size:38px;line-height:1.15;margin:6px 0 10px}
   border-radius:8px; cursor:pointer; color:var(--ink);
 }
 .account-menu .item:hover{ background:#f7f8fa; }
+
+/* Responsive adjustments for centered nav */
+@media (max-width:720px){
+  .nav-center{ position:static; transform:none; margin:0 auto; }
+  .links{ justify-content:space-between; }
+}
