@@ -18,7 +18,8 @@
       </a>
       <nav class="links" aria-label="Primary">
         <a href="pricing.html">Pricing</a>
-        <a href="signin.html" class="btn small ghost">Sign in</a>
+        <!-- Converted to modal trigger -->
+        <button class="btn small ghost js-open-auth" type="button">Sign in</button>
         <a href="app.html" class="btn small primary">Try it out</a>
       </nav>
     </div>
@@ -33,7 +34,8 @@
         <p class="lead">Drop a photo or screenshot. We extract a clean palette, generate CSS variables & utility classes, and preview components. Create an account to save palettes; Pro unlocks batch & brand tokens.</p>
         <div style="display:flex;gap:10px;flex-wrap:wrap">
           <a href="app.html" class="btn accent">Try it out</a>
-          <a href="signin.html" class="btn">Sign In</a>
+          <!-- Converted to modal trigger -->
+          <button class="btn js-open-auth" type="button">Sign in</button>
         </div>
       </div>
 
@@ -72,11 +74,86 @@
     </div>
   </footer>
 
+  <!-- ===================== -->
+  <!-- Auth Modal (Sign in)  -->
+  <!-- ===================== -->
+  <div class="modal" id="authModal" aria-hidden="true">
+    <div class="modal__scrim" data-close></div>
+    <div class="modal__dialog" role="dialog" aria-modal="true" aria-labelledby="authTitle" aria-describedby="authDesc">
+      <button class="modal__close" type="button" aria-label="Close" title="Close" data-close>×</button>
+
+      <div class="modal__header">
+        <h2 id="authTitle">Welcome back</h2>
+        <p id="authDesc" class="modal__desc">Sign in to save palettes and access Pro features.</p>
+      </div>
+
+      <!-- Tabs: Sign in / Create account -->
+      <div class="modal__tabs" role="tablist" aria-label="Authentication">
+        <button class="tab is-active" role="tab" aria-selected="true" aria-controls="panel-signin" id="tab-signin">Sign in</button>
+        <button class="tab" role="tab" aria-selected="false" aria-controls="panel-signup" id="tab-signup">Create account</button>
+      </div>
+
+      <div class="modal__content">
+        <!-- Sign in panel -->
+        <section id="panel-signin" role="tabpanel" aria-labelledby="tab-signin">
+          <form class="form" id="formSignIn">
+            <label class="label" for="si-email">Email</label>
+            <input class="input" id="si-email" type="email" required autocomplete="email" placeholder="you@example.com"/>
+
+            <div class="row">
+              <div style="flex:1">
+                <label class="label" for="si-pass">Password</label>
+                <input class="input" id="si-pass" type="password" required autocomplete="current-password" placeholder="••••••••"/>
+              </div>
+              <div class="row-end">
+                <a href="#" class="link">Forgot?</a>
+              </div>
+            </div>
+
+            <button class="btn primary block" type="submit">Sign in</button>
+
+            <div class="or">
+              <span>or</span>
+            </div>
+
+            <button class="btn google block" type="button" id="googleSignIn">
+              <svg aria-hidden="true" width="18" height="18" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.5H42v-.1H24v7.2h11.3C33.7 32.3 29.3 35 24 35c-7.2 0-13-5.8-13-13S16.8 9 24 9c3.3 0 6.3 1.2 8.6 3.2l5.1-5.1C34.7 3.2 29.6 1 24 1 11.8 1 2 10.8 2 23s9.8 22 22 22c12.2 0 22-9.8 22-22 0-1.5-.2-3-.4-4.5z"/><path fill="#FF3D00" d="M6.3 14.7l5.9 4.3C13.6 15.7 18.4 13 24 13c3.3 0 6.3 1.2 8.6 3.2l5.1-5.1C34.7 3.2 29.6 1 24 1 14.2 1 5.9 6 1.7 14.1l4.6 3.6z"/><path fill="#4CAF50" d="M24 45c5.2 0 10-1.8 13.7-4.9l-6.3-5c-2 1.3-4.6 2-7.4 2-5.3 0-9.7-2.7-11.3-6.5l-6.3 4.9C9.6 41.7 16.3 45 24 45z"/><path fill="#1976D2" d="M43.6 20.5H42v-.1H24v7.2h11.3C34.7 32.3 29.3 35 24 35c-7.2 0-13-5.8-13-13S16.8 9 24 9c3.3 0 6.3 1.2 8.6 3.2l5.1-5.1C34.7 3.2 29.6 1 24 1 14.2 1 5.9 6 1.7 14.1l4.6 3.6z"/></svg>
+              Continue with Google
+            </button>
+          </form>
+        </section>
+
+        <!-- Sign up panel -->
+        <section id="panel-signup" role="tabpanel" aria-labelledby="tab-signup" hidden>
+          <form class="form" id="formSignUp">
+            <label class="label" for="su-name">Name</label>
+            <input class="input" id="su-name" type="text" required autocomplete="name" placeholder="Your name"/>
+
+            <label class="label" for="su-email">Email</label>
+            <input class="input" id="su-email" type="email" required autocomplete="email" placeholder="you@example.com"/>
+
+            <label class="label" for="su-pass">Password</label>
+            <input class="input" id="su-pass" type="password" required autocomplete="new-password" placeholder="Create a password"/>
+
+            <button class="btn primary block" type="submit">Create account</button>
+
+            <div class="or"><span>or</span></div>
+
+            <button class="btn google block" type="button" id="googleSignUp">
+              <svg aria-hidden="true" width="18" height="18" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.5H42v-.1H24v7.2h11.3C33.7 32.3 29.3 35 24 35c-7.2 0-13-5.8-13-13S16.8 9 24 9c3.3 0 6.3 1.2 8.6 3.2l5.1-5.1C34.7 3.2 29.6 1 24 1 11.8 1 2 10.8 2 23s9.8 22 22 22c12.2 0 22-9.8 22-22 0-1.5-.2-3-.4-4.5z"/><path fill="#FF3D00" d="M6.3 14.7l5.9 4.3C13.6 15.7 18.4 13 24 13c3.3 0 6.3 1.2 8.6 3.2l5.1-5.1C34.7 3.2 29.6 1 24 1 14.2 1 5.9 6 1.7 14.1l4.6 3.6z"/><path fill="#4CAF50" d="M24 45c5.2 0 10-1.8 13.7-4.9l-6.3-5c-2 1.3-4.6 2-7.4 2-5.3 0-9.7-2.7-11.3-6.5l-6.3 4.9C9.6 41.7 16.3 45 24 45z"/><path fill="#1976D2" d="M43.6 20.5H42v-.1H24v7.2h11.3C34.7 32.3 29.3 35 24 35c-7.2 0-13-5.8-13-13S16.8 9 24 9c3.3 0 6.3 1.2 8.6 3.2l5.1-5.1C34.7 3.2 29.6 1 24 1 14.2 1 5.9 6 1.7 14.1l4.6 3.6z"/></svg>
+              Continue with Google
+            </button>
+          </form>
+        </section>
+      </div>
+    </div>
+  </div>
+
   <script>
     // Year
     document.getElementById('y').textContent = new Date().getFullYear();
 
-    // Typewriter (slower, fixed-height code block prevents layout shifts)
+    // Typewriter (unchanged)
     const codeEl = document.getElementById('exampleCode');
     const snippet =
 `/* Example output */
@@ -105,42 +182,112 @@
   --card-ink: var(--ink);
   --card-accent: var(--color-1);
 }`;
-
     const prefersReduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     if (prefersReduce) {
       codeEl.textContent = snippet;
     } else {
-      const SPEED = 45;     // ms per char (slower)
-      const PAUSE = 2500;   // ms at end before restarting
-      let i = 0, timer = null, running = true;
-
-      function schedule(delay){ timer = setTimeout(tick, delay); }
+      const SPEED = 45, PAUSE = 2500; let i = 0, timer = null, running = true;
+      function schedule(d){ timer = setTimeout(tick, d); }
       function clearTimer(){ if (timer) { clearTimeout(timer); timer = null; } }
-
       function tick(){
         if (!running) return;
         codeEl.textContent = snippet.slice(0, i++);
-        if (i <= snippet.length) {
-          schedule(SPEED);
-        } else {
-          setTimeout(() => {
-            if (!running) return;
-            i = 0; codeEl.textContent = '';
-            schedule(SPEED);
-          }, PAUSE);
-        }
+        if (i <= snippet.length) schedule(SPEED);
+        else setTimeout(() => { if (!running) return; i = 0; codeEl.textContent = ''; schedule(SPEED); }, PAUSE);
       }
-
-      // Pause when the tab isn't visible (no background CPU)
-      document.addEventListener('visibilitychange', () => {
-        if (document.hidden) { running = false; clearTimer(); }
-        else { if (!running) { running = true; schedule(SPEED); } }
-      });
-
-      // Start
+      document.addEventListener('visibilitychange', () => { if (document.hidden){ running=false; clearTimer(); } else { if(!running){ running=true; schedule(SPEED); } } });
       schedule(SPEED);
     }
+
+    // ==========================
+    // Auth modal logic (no auth)
+    // ==========================
+    const modal = document.getElementById('authModal');
+    const openers = document.querySelectorAll('.js-open-auth');
+    const scrim = modal.querySelector('.modal__scrim');
+    const closeBtns = modal.querySelectorAll('[data-close]');
+    const tabSignin = document.getElementById('tab-signin');
+    const tabSignup = document.getElementById('tab-signup');
+    const panelSignin = document.getElementById('panel-signin');
+    const panelSignup = document.getElementById('panel-signup');
+
+    let lastFocus = null;
+
+    function openModal() {
+      lastFocus = document.activeElement;
+      modal.classList.add('open');
+      modal.setAttribute('aria-hidden', 'false');
+      // default to Sign in tab
+      activateTab('signin');
+      // focus first field
+      setTimeout(() => document.getElementById('si-email')?.focus(), 10);
+      trapFocus(true);
+    }
+
+    function closeModal() {
+      modal.classList.remove('open');
+      modal.setAttribute('aria-hidden', 'true');
+      trapFocus(false);
+      lastFocus?.focus();
+    }
+
+    function activateTab(which) {
+      const isSignIn = which === 'signin';
+      tabSignin.classList.toggle('is-active', isSignIn);
+      tabSignup.classList.toggle('is-active', !isSignIn);
+      tabSignin.setAttribute('aria-selected', String(isSignIn));
+      tabSignup.setAttribute('aria-selected', String(!isSignIn));
+      panelSignin.hidden = !isSignIn;
+      panelSignup.hidden = isSignIn;
+      (isSignIn ? tabSignin : tabSignup).focus();
+    }
+
+    // simple focus trap
+    function trapFocus(on) {
+      if (!on) { document.removeEventListener('keydown', onKeyDown); return; }
+      document.addEventListener('keydown', onKeyDown);
+      function onKeyDown(e){
+        if (e.key === 'Escape') return closeModal();
+        if (e.key !== 'Tab') return;
+        const focusables = modal.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+        const list = Array.from(focusables).filter(el => !el.hasAttribute('disabled') && el.offsetParent !== null);
+        if (!list.length) return;
+        const first = list[0], last = list[list.length - 1];
+        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      }
+    }
+
+    // Events
+    openers.forEach(btn => btn.addEventListener('click', openModal));
+    scrim.addEventListener('click', closeModal);
+    closeBtns.forEach(b => b.addEventListener('click', closeModal));
+    tabSignin.addEventListener('click', () => activateTab('signin'));
+    tabSignup.addEventListener('click', () => activateTab('signup'));
+
+    // Fake handlers (replace with your auth)
+    document.getElementById('formSignIn').addEventListener('submit', (e) => {
+      e.preventDefault();
+      // TODO: call your sign-in endpoint
+      alert('Signed in (demo)');
+      closeModal();
+    });
+    document.getElementById('formSignUp').addEventListener('submit', (e) => {
+      e.preventDefault();
+      // TODO: call your sign-up endpoint
+      alert('Account created (demo)');
+      closeModal();
+    });
+    document.getElementById('googleSignIn').addEventListener('click', () => {
+      // TODO: redirect to your Google OAuth endpoint
+      alert('Google sign in (demo)');
+      closeModal();
+    });
+    document.getElementById('googleSignUp').addEventListener('click', () => {
+      // TODO: redirect to your Google OAuth endpoint
+      alert('Google sign up (demo)');
+      closeModal();
+    });
   </script>
 </body>
 </html>
-
