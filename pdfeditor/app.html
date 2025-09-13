@@ -252,8 +252,16 @@
           return;
         }
 
-        outCss.textContent = payload.css || "/* No CSS returned */";
-        outHtml.textContent = payload.html || "/* No HTML returned */";
+        // ✅ Format output nicely
+        const prettyCss = (payload.css || "")
+          .trim()
+          .replace(/(?<=})/g, "\n");
+        const prettyHtml = (payload.html || "")
+          .trim()
+          .replace(/></g, ">\n<");
+
+        outCss.textContent = prettyCss || "/* No CSS returned */";
+        outHtml.textContent = prettyHtml || "/* No HTML returned */";
 
       } catch (e) {
         setStatus("Fetch error");
