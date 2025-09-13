@@ -1,22 +1,23 @@
-export const config = { runtime: "nodejs20.x" }; // Node 20 on Vercel
 const MODEL = "gpt-5";
 
 export default async function handler(req, res) {
   try {
+    // Quick diagnostics
+    if (req.method === "GET" && req.query?.diag === "1") {
+      return res.status(200).json({
+        ok: true,
+        env_present: Boolean(process.env.OPENAI_API_KEY),
+        node: process.version,
+        model: MODEL,
+      });
+    }
+
     if (req.method !== "POST") {
-      if (req.method === "GET" && req.query?.diag === "1") {
-        return res.status(200).json({
-          ok: true,
-          env_present: Boolean(process.env.OPENAI_API_KEY),
-          node: process.version,
-          model: MODEL,
-        });
-      }
       res.setHeader("Allow", "POST");
       return res.status(405).json({ error: "method_not_allowed" });
     }
 
-    // Read JSON body (works for Vercel Node serverless; body may already be parsed)
+    // Read JSON body (works on Vercel Node)
     let body = req.body;
     if (!body) {
       const chunks = [];
@@ -43,12 +44,15 @@ export default async function handler(req, res) {
       "- Return STRICT JSON only: {\"css\":\"...\",\"html\":\"...\"}.\n" +
       "- Scope ALL selectors under the provided scope (e.g. .comp button {...}).\n" +
       "- Approximate fonts/sizes/colors/borders/shadows from the image.\n" +
-      "- Include :hover and :focus-visible only when visually implied.\n" +
+      "- Include :hover and :focus-visible when visually implied.\n" +
       "- Minimal semantic HTML; no external assets.";
 
-    const userText = `Scope class: ${scope}\nComponent hint: ${component}\nInfer styles from the image and output JSON ONLY with keys: css, html.`;
+    const userText =
+      `Scope class: ${scope}\n` +
+      `Component hint: ${component}\n` +
+      "Infer styles from the image and output JSON ONLY with keys: css, html.";
 
-    // OpenAI call (GPT-5 ONLY)
+    // ---- OpenAI (GPT-5 ONLY) ----
     const oai = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -72,19 +76,13 @@ export default async function handler(req, res) {
     });
 
     const rawText = await oai.text();
+
     if (!oai.ok) {
+      // You’ll see 401/403/404 here if you don’t have GPT-5 API access
       return res.status(oai.status).json({
         error: "openai_error",
         status: oai.status,
         detail: rawText,
-        hint:
-          oai.status === 404
-            ? "Model gpt-5 not found for this API key (no access)."
-            : oai.status === 403
-            ? "This account is not permitted to use gpt-5."
-            : oai.status === 401
-            ? "Invalid API key."
-            : undefined,
       });
     }
 
@@ -92,8 +90,9 @@ export default async function handler(req, res) {
     let content = rawText.trim().replace(/^```(?:json)?\s*/i, "").replace(/```$/i, "").trim();
 
     let parsed;
-    try { parsed = JSON.parse(content); } catch { /* try repair below */ }
+    try { parsed = JSON.parse(content); } catch { /* continue */ }
 
+    // Optional JSON repair
     if (!parsed && Number(double_checks) > 0) {
       const fix = await fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
