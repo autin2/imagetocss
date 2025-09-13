@@ -206,13 +206,13 @@
   <script src="https://unpkg.com/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
   <script>
     // ---- Init (public anon key is safe in browser) ----
-    const SUPABASE_URL = "https://vsdmfjkhehtagsrvxbav.supabase.co";            // e.g. https://abcdxyz.supabase.co
-    const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZzZG1mamtoZWh0YWdzcnZ4YmF2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc3OTA1NjksImV4cCI6MjA3MzM2NjU2OX0.Xd1VhsuOhJF1iEDaw1JApJ5JigJTODypjogm3hdrXxA";  // from Project Settings → API
+    const SUPABASE_URL = "https://vsdmfjkhehtagsrvxbav.supabase.co";
+    const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZzZG1mamtoZWh0YWdzcnZ4YmF2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc3OTA1NjksImV4cCI6MjA3MzM2NjU2OX0.Xd1VhsuOhJF1iEDaw1JApJ5JigJTODypjogm3hdrXxA";
     const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
       auth: { persistSession: true, autoRefreshToken: true }
     });
 
-    // ---- Modal wiring (kept from your previous version) ----
+    // ---- Modal wiring ----
     const modal = document.getElementById('authModal');
     const openers = document.querySelectorAll('.js-open-auth');
     const scrim = modal.querySelector('.modal__scrim');
@@ -267,33 +267,84 @@
     tabSignin.addEventListener('click', () => activateTab('signin'));
     tabSignup.addEventListener('click', () => activateTab('signup'));
 
-    // ---- Header UI swap (Sign in ↔ user) ----
+    // ---- Header UI swap (Sign in ↔ user) with dropdown ----
     const nav = document.querySelector('.links');
+    let closeAccountMenuHandler = null;
+
     function setSignedInUI(user) {
-      const signInBtn = nav.querySelector('.js-open-auth');
-      let acctBtn = nav.querySelector('.js-account');
+      const tryButtonBefore = nav.querySelector('a.btn.small.primary'); // "Try it out"
+      const existingTrigger = nav.querySelector('.js-open-auth');       // Sign in button
+      const existingAccount = nav.querySelector('.account');            // prior dropdown wrapper
+
+      // remove previous account block if any (fresh build)
+      if (existingAccount) existingAccount.remove();
 
       if (user) {
-        const name = user.user_metadata?.name || user.email || "Account";
-        if (signInBtn) signInBtn.remove();
-        if (!acctBtn) {
-          acctBtn = document.createElement('button');
-          acctBtn.className = 'btn small ghost js-account';
-          acctBtn.type = 'button';
-          nav.insertBefore(acctBtn, nav.querySelector('a.btn.small.primary'));
+        // remove "Sign in" button
+        if (existingTrigger) existingTrigger.remove();
+
+        // build dropdown
+        const wrap = document.createElement('div');
+        wrap.className = 'account';
+
+        const trigger = document.createElement('button');
+        trigger.type = 'button';
+        trigger.className = 'btn small ghost account-btn';
+        trigger.setAttribute('aria-haspopup', 'menu');
+        trigger.setAttribute('aria-expanded', 'false');
+        trigger.textContent = user.user_metadata?.name || user.email || 'Account';
+
+        const menu = document.createElement('div');
+        menu.className = 'account-menu';
+        menu.setAttribute('role', 'menu');
+
+        const signOut = document.createElement('button');
+        signOut.type = 'button';
+        signOut.className = 'item';
+        signOut.setAttribute('role', 'menuitem');
+        signOut.textContent = 'Sign out';
+        signOut.addEventListener('click', async () => {
+          await supabaseClient.auth.signOut();
+          hideMenu();
+        });
+
+        menu.appendChild(signOut);
+        wrap.appendChild(trigger);
+        wrap.appendChild(menu);
+        nav.insertBefore(wrap, tryButtonBefore);
+
+        // menu logic
+        function showMenu(){
+          menu.classList.add('open');
+          trigger.setAttribute('aria-expanded','true');
+          document.addEventListener('click', outside, { capture:true });
+          document.addEventListener('keydown', onKey);
+          closeAccountMenuHandler = hideMenu;
         }
-        acctBtn.textContent = name;
-        acctBtn.onclick = async () => { await supabaseClient.auth.signOut(); };
+        function hideMenu(){
+          menu.classList.remove('open');
+          trigger.setAttribute('aria-expanded','false');
+          document.removeEventListener('click', outside, { capture:true });
+          document.removeEventListener('keydown', onKey);
+          closeAccountMenuHandler = null;
+        }
+        function toggle(){ menu.classList.contains('open') ? hideMenu() : showMenu(); }
+        function outside(e){ if (!wrap.contains(e.target)) hideMenu(); }
+        function onKey(e){ if (e.key === 'Escape') { hideMenu(); trigger.focus(); } }
+
+        trigger.addEventListener('click', toggle);
       } else {
+        // if signed out → ensure "Sign in" exists
         if (!nav.querySelector('.js-open-auth')) {
           const btn = document.createElement('button');
           btn.type = 'button';
           btn.className = 'btn small ghost js-open-auth';
           btn.textContent = 'Sign in';
           btn.addEventListener('click', openModal);
-          nav.insertBefore(btn, nav.querySelector('a.btn.small.primary'));
+          nav.insertBefore(btn, tryButtonBefore);
         }
-        if (acctBtn) acctBtn.remove();
+        // close any leftover menu
+        if (closeAccountMenuHandler) closeAccountMenuHandler();
       }
     }
 
@@ -332,7 +383,7 @@
         suErr.style.display = 'block';
         return;
       }
-      // Depending on project settings, user may need to confirm email.
+      // Depending on project settings, user may need to confirm email via email link.
       closeModal();
     });
 
@@ -361,4 +412,3 @@
   </script>
 </body>
 </html>
-
