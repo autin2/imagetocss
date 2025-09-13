@@ -262,3 +262,20 @@ h1{font-size:38px;line-height:1.15;margin:6px 0 10px}
   border-color:#dfe3ea; background:#fff; color:#1f2937;
 }
 .btn.google:hover{ background:#f7f8fa; }
+
+/* Account dropdown */
+.account { position: relative; }
+.account-btn[aria-expanded="true"] { background:#f2f4f7; }
+.account-menu{
+  position:absolute; right:0; top:calc(100% + 6px);
+  min-width: 170px; padding:6px;
+  background:#fff; border:1px solid var(--border); border-radius:10px;
+  box-shadow: var(--shadow); display:none; z-index:60;
+}
+.account-menu.open{ display:block; }
+.account-menu .item{
+  display:flex; align-items:center; gap:8px; width:100%;
+  padding:8px 10px; border:0; background:none; text-align:left;
+  border-radius:8px; cursor:pointer; color:var(--ink);
+}
+.account-menu .item:hover{ background:#f7f8fa; }
