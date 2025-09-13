@@ -36,9 +36,20 @@ body{
 .brand{display:flex;align-items:center;gap:10px;text-decoration:none;color:var(--ink)}
 .brand-mark{width:28px;height:28px;border-radius:8px;background:var(--ink)}
 .brand b{font-weight:800;letter-spacing:.2px}
-.links{display:flex;gap:10px;align-items:center}
-.links a, .links button{color:var(--muted);text-decoration:none;padding:8px 10px;border-radius:10px;background:none;border:0;cursor:pointer}
-.links a:hover, .links button:hover{color:var(--ink);background:#f2f4f7}
+
+/* New nav layout: left cluster + right auth slot */
+.links{
+  display:flex; align-items:center; justify-content:space-between; gap:12px; flex:1;
+}
+.nav-left{ display:flex; align-items:center; gap:10px; }
+.nav-auth{ display:flex; align-items:center; }
+
+/* Link/button base styles (work for buttons inside .links too) */
+.links a, .links button{
+  color:var(--muted); text-decoration:none; padding:8px 10px; border-radius:10px;
+  background:none; border:0; cursor:pointer; font:inherit;
+}
+.links a:hover, .links button:hover{ color:var(--ink); background:#f2f4f7 }
 
 /* Buttons */
 .btn{appearance:none;border:1px solid var(--border);background:#fff;color:var(--ink);
@@ -181,6 +192,7 @@ h1{font-size:38px;line-height:1.15;margin:6px 0 10px}
 }
 .api-pill b{ font-weight:800; }
 
+/* Loading UI */
 .loading-scrim{
   position:fixed; inset:0; z-index:9999;
   background:rgba(15,23,42,.42); backdrop-filter:blur(3px);
@@ -263,7 +275,9 @@ h1{font-size:38px;line-height:1.15;margin:6px 0 10px}
 }
 .btn.google:hover{ background:#f7f8fa; }
 
-/* Account dropdown */
+/* ===================== */
+/* Account dropdown      */
+/* ===================== */
 .account { position: relative; }
 .account-btn[aria-expanded="true"] { background:#f2f4f7; }
 .account-menu{
