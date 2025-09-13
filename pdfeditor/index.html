@@ -17,10 +17,14 @@
         <b>Image&nbsp;to&nbsp;CSS</b>
       </a>
       <nav class="links" aria-label="Primary">
-        <a href="pricing.html">Pricing</a>
-        <!-- Modal trigger -->
-        <button class="btn small ghost js-open-auth" type="button">Sign in</button>
-        <a href="app.html" class="btn small primary">Try it out</a>
+        <div class="nav-left">
+          <a href="pricing.html">Pricing</a>
+          <a href="app.html" class="btn small primary">Try it out</a>
+        </div>
+        <div class="nav-auth">
+          <!-- Initial: Sign in button; replaced by account dropdown when signed in -->
+          <button class="btn small ghost js-open-auth" type="button">Sign in</button>
+        </div>
       </nav>
     </div>
   </header>
@@ -267,22 +271,15 @@
     tabSignin.addEventListener('click', () => activateTab('signin'));
     tabSignup.addEventListener('click', () => activateTab('signup'));
 
-    // ---- Header UI swap (Sign in ↔ user) with dropdown ----
-    const nav = document.querySelector('.links');
+    // ---- Header UI swap (Sign in ↔ user) with right-anchored dropdown ----
+    const authSlot = document.querySelector('.nav-auth');
     let closeAccountMenuHandler = null;
 
     function setSignedInUI(user) {
-      const tryButtonBefore = nav.querySelector('a.btn.small.primary'); // "Try it out"
-      const existingTrigger = nav.querySelector('.js-open-auth');       // Sign in button
-      const existingAccount = nav.querySelector('.account');            // prior dropdown wrapper
-
-      // remove previous account block if any (fresh build)
-      if (existingAccount) existingAccount.remove();
+      // Clear current content of auth slot
+      authSlot.replaceChildren();
 
       if (user) {
-        // remove "Sign in" button
-        if (existingTrigger) existingTrigger.remove();
-
         // build dropdown
         const wrap = document.createElement('div');
         wrap.className = 'account';
@@ -311,7 +308,7 @@
         menu.appendChild(signOut);
         wrap.appendChild(trigger);
         wrap.appendChild(menu);
-        nav.insertBefore(wrap, tryButtonBefore);
+        authSlot.appendChild(wrap);
 
         // menu logic
         function showMenu(){
@@ -334,15 +331,14 @@
 
         trigger.addEventListener('click', toggle);
       } else {
-        // if signed out → ensure "Sign in" exists
-        if (!nav.querySelector('.js-open-auth')) {
-          const btn = document.createElement('button');
-          btn.type = 'button';
-          btn.className = 'btn small ghost js-open-auth';
-          btn.textContent = 'Sign in';
-          btn.addEventListener('click', openModal);
-          nav.insertBefore(btn, tryButtonBefore);
-        }
+        // Signed out → restore Sign in button in the right slot
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'btn small ghost js-open-auth';
+        btn.textContent = 'Sign in';
+        btn.addEventListener('click', openModal);
+        authSlot.appendChild(btn);
+
         // close any leftover menu
         if (closeAccountMenuHandler) closeAccountMenuHandler();
       }
@@ -383,7 +379,6 @@
         suErr.style.display = 'block';
         return;
       }
-      // Depending on project settings, user may need to confirm email via email link.
       closeModal();
     });
 
