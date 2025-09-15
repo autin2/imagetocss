@@ -54,6 +54,21 @@
     .note{ text-align:center; color:var(--muted); font-size:12px; }
 
     @keyframes fadeUp{ to{ opacity:1; transform: translateY(0); } }
+
+    /* Account dropdown (same as app/index) */
+    .account { position: relative; }
+    .account-menu{
+      position:absolute; top:calc(100% + 6px); right:0;
+      background:#fff; border:1px solid var(--border); border-radius:12px;
+      padding:6px; min-width: 140px; box-shadow: var(--shadow);
+      display:none;
+    }
+    .account-menu.open{ display:block; }
+    .account-menu .item{
+      display:block; width:100%; text-align:left;
+      background:transparent; border:0; padding:10px 10px; border-radius:8px; cursor:pointer;
+    }
+    .account-menu .item:hover{ background:#f6f7f9; }
   </style>
 </head>
 <body>
@@ -93,22 +108,10 @@
         <div class="price-body">
           <p class="price"><span class="amount">$0</span><span class="per">/mo</span></p>
 
-          <div class="feature">
-            <span class="dot" aria-hidden="true"></span>
-            <div>Access to AI Code Commenter</div>
-          </div>
-          <div class="feature off">
-            <span class="x" aria-hidden="true">×</span>
-            <div>Local-only — nothing stored</div>
-          </div>
-          <div class="feature off">
-            <span class="x" aria-hidden="true">×</span>
-            <div>Access to image → css</div>
-          </div>
-          <div class="feature off">
-            <span class="x" aria-hidden="true">×</span>
-            <div>Higher limits (10MB), faster queue</div>
-          </div>
+          <div class="feature"><span class="dot"></span><div>Access to AI Code Commenter</div></div>
+          <div class="feature off"><span class="x">×</span><div>Local-only — nothing stored</div></div>
+          <div class="feature off"><span class="x">×</span><div>Access to image → css</div></div>
+          <div class="feature off"><span class="x">×</span><div>Higher limits (10MB), faster queue</div></div>
         </div>
         <div class="price-cta">
           <a href="app.html" class="btn block">Use Free</a>
@@ -144,7 +147,7 @@
     </div>
   </footer>
 
-  <!-- Minimal auth-state reflection identical to index behavior -->
+  <!-- Supabase + header auth dropdown like index -->
   <script src="https://unpkg.com/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
   <script>
     document.getElementById('y').textContent = new Date().getFullYear();
@@ -156,15 +159,56 @@
     });
 
     const authSlot = document.querySelector('.nav-auth');
+
     function setSignedInUI(user) {
       authSlot.replaceChildren();
+
       if (user) {
-        const btn = document.createElement('button');
-        btn.className = 'btn small ghost';
-        btn.textContent = user.user_metadata?.name || user.email || 'Account';
-        btn.title = 'Click to sign out';
-        btn.onclick = () => supabaseClient.auth.signOut();
-        authSlot.appendChild(btn);
+        const wrap = document.createElement('div');
+        wrap.className = 'account';
+
+        const trigger = document.createElement('button');
+        trigger.type = 'button';
+        trigger.className = 'btn small ghost';
+        trigger.textContent = user.user_metadata?.name || user.email || 'Account';
+        trigger.setAttribute('aria-haspopup', 'menu');
+        trigger.setAttribute('aria-expanded', 'false');
+
+        const menu = document.createElement('div');
+        menu.className = 'account-menu';
+        menu.setAttribute('role', 'menu');
+
+        const signOut = document.createElement('button');
+        signOut.type = 'button';
+        signOut.className = 'item';
+        signOut.setAttribute('role','menuitem');
+        signOut.textContent = 'Sign out';
+        signOut.addEventListener('click', async () => {
+          await supabaseClient.auth.signOut();
+          hideMenu();
+        });
+
+        menu.appendChild(signOut);
+        wrap.append(trigger, menu);
+        authSlot.appendChild(wrap);
+
+        function showMenu(){
+          menu.classList.add('open');
+          trigger.setAttribute('aria-expanded','true');
+          document.addEventListener('click', outside, { capture:true });
+          document.addEventListener('keydown', onKey);
+        }
+        function hideMenu(){
+          menu.classList.remove('open');
+          trigger.setAttribute('aria-expanded','false');
+          document.removeEventListener('click', outside, { capture:true });
+          document.removeEventListener('keydown', onKey);
+        }
+        function toggle(){ menu.classList.contains('open') ? hideMenu() : showMenu(); }
+        function outside(e){ if (!wrap.contains(e.target)) hideMenu(); }
+        function onKey(e){ if (e.key === 'Escape') { hideMenu(); trigger.focus(); } }
+
+        trigger.addEventListener('click', toggle);
       } else {
         const b = document.createElement('button');
         b.type = 'button';
@@ -173,6 +217,7 @@
         authSlot.appendChild(b);
       }
     }
+
     (async () => {
       const { data: { session } } = await supabaseClient.auth.getSession();
       setSignedInUI(session?.user || null);
