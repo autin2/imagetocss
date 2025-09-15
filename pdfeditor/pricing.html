@@ -68,11 +68,9 @@
     }
     .account-menu .item:hover{ background:#f6f7f9; }
 
-    /* Tiny focus ring when arriving via #pro */
     .price-card.focus { outline:2px solid var(--accent); outline-offset:2px; }
 
-    /* ✅ missing before: run the entrance animation */
-    @keyframes fadeUp { to { opacity:1; transform: translateY(0); } }
+    @keyframes fadeUp{ to{ opacity:1; transform: translateY(0); } }
   </style>
 </head>
 <body>
@@ -129,7 +127,7 @@
           <span class="plan-tag">Popular</span>
         </header>
         <div class="price-body">
-          <p class="price"><span class="amount">$10</span><span class="per">/mo</span></p>
+          <p class="price"><span class="amount">$12</span><span class="per">/mo</span></p>
           <div class="feature"><span class="dot"></span><div>Access to Image &gt; CSS Generator</div></div>
           <div class="feature"><span class="dot"></span><div>Access to AI Code Commenter</div></div>
           <div class="feature"><span class="dot"></span><div>24/h Email Support</div></div>
@@ -152,7 +150,68 @@
     </div>
   </footer>
 
-  <!-- Supabase + header auth dropdown + Stripe wiring -->
+  <!-- ===================== -->
+  <!-- Auth Modal (same as index) -->
+  <!-- ===================== -->
+  <div class="modal" id="authModal" aria-hidden="true">
+    <div class="modal__scrim" data-close></div>
+    <div class="modal__dialog" role="dialog" aria-modal="true" aria-labelledby="authTitle" aria-describedby="authDesc">
+      <button class="modal__close" type="button" aria-label="Close" title="Close" data-close>×</button>
+
+      <div class="modal__header">
+        <h2 id="authTitle">Welcome back</h2>
+        <p id="authDesc" class="modal__desc">Sign in to save palettes and access Pro features.</p>
+      </div>
+
+      <div class="modal__tabs" role="tablist" aria-label="Authentication">
+        <button class="tab is-active" role="tab" aria-selected="true" aria-controls="panel-signin" id="tab-signin">Sign in</button>
+        <button class="tab" role="tab" aria-selected="false" aria-controls="panel-signup" id="tab-signup">Create account</button>
+      </div>
+
+      <div class="modal__content">
+        <section id="panel-signin" role="tabpanel" aria-labelledby="tab-signin">
+          <form class="form" id="formSignIn">
+            <label class="label" for="si-email">Email</label>
+            <input class="input" id="si-email" type="email" required autocomplete="email" placeholder="you@example.com"/>
+            <div class="row">
+              <div style="flex:1">
+                <label class="label" for="si-pass">Password</label>
+                <input class="input" id="si-pass" type="password" required autocomplete="current-password" placeholder="••••••••"/>
+              </div>
+              <div class="row-end"><a href="#" class="link">Forgot?</a></div>
+            </div>
+            <button class="btn primary block" type="submit">Sign in</button>
+            <div class="or"><span>or</span></div>
+            <button class="btn google block" type="button" id="googleSignIn">
+              <svg aria-hidden="true" width="18" height="18" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.5H42v-.1H24v7.2h11.3C33.7 32.3 29.3 35 24 35c-7.2 0-13-5.8-13-13S16.8 9 24 9c3.3 0 6.3 1.2 8.6 3.2l5.1-5.1C34.7 3.2 29.6 1 24 1 14.2 1 5.9 6 1.7 14.1l4.6 3.6z"/><path fill="#FF3D00" d="M6.3 14.7l5.9 4.3C13.6 15.7 18.4 13 24 13c3.3 0 6.3 1.2 8.6 3.2l5.1-5.1C34.7 3.2 29.6 1 24 1 14.2 1 5.9 6 1.7 14.1l4.6 3.6z"/><path fill="#4CAF50" d="M24 45c5.2 0 10-1.8 13.7-4.9l-6.3-5c-2 1.3-4.6 2-7.4 2-5.3 0-9.7-2.7-11.3-6.5l-6.3 4.9C9.6 41.7 16.3 45 24 45z"/><path fill="#1976D2" d="M43.6 20.5H42v-.1H24v7.2h11.3C34.7 32.3 29.3 35 24 35c-7.2 0-13-5.8-13-13S16.8 9 24 9c3.3 0 6.3 1.2 8.6 3.2l5.1-5.1C34.7 3.2 29.6 1 24 1 14.2 1 5.9 6 1.7 14.1l4.6 3.6z"/></svg>
+              Continue with Google
+            </button>
+            <p id="si-error" class="hint" style="color:#b91c1c;display:none;margin:8px 0 0"></p>
+          </form>
+        </section>
+
+        <section id="panel-signup" role="tabpanel" aria-labelledby="tab-signup" hidden>
+          <form class="form" id="formSignUp">
+            <label class="label" for="su-name">Name</label>
+            <input class="input" id="su-name" type="text" autocomplete="name" placeholder="Your name"/>
+            <label class="label" for="su-email">Email</label>
+            <input class="input" id="su-email" type="email" required autocomplete="email" placeholder="you@example.com"/>
+            <label class="label" for="su-pass">Password</label>
+            <input class="input" id="su-pass" type="password" required autocomplete="new-password" placeholder="Create a password"/>
+            <button class="btn primary block" type="submit">Create account</button>
+            <div class="or"><span>or</span></div>
+            <button class="btn google block" type="button" id="googleSignUp">
+              <svg aria-hidden="true" width="18" height="18" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.5H42v-.1H24v7.2h11.3C33.7 32.3 29.3 35 24 35c-7.2 0-13-5.8-13-13S16.8 9 24 9c3.3 0 6.3 1.2 8.6 3.2l5.1-5.1C34.7 3.2 29.6 1 24 1 14.2 1 5.9 6 1.7 14.1l4.6 3.6z"/><path fill="#FF3D00" d="M6.3 14.7l5.9 4.3C13.6 15.7 18.4 13 24 13c3.3 0 6.3 1.2 8.6 3.2l5.1-5.1C34.7 3.2 29.6 1 24 1 14.2 1 5.9 6 1.7 14.1l4.6 3.6z"/><path fill="#4CAF50" d="M24 45c5.2 0 10-1.8 13.7-4.9l-6.3-5c-2 1.3-4.6 2-7.4 2-5.3 0-9.7-2.7-11.3-6.5l-6.3 4.9C9.6 41.7 16.3 45 24 45z"/><path fill="#1976D2" d="M43.6 20.5H42v-.1H24v7.2h11.3C34.7 32.3 29.3 35 24 35c-7.2 0-13-5.8-13-13S16.8 9 24 9c3.3 0 6.3 1.2 8.6 3.2l5.1-5.1C34.7 3.2 29.6 1 24 1 14.2 1 5.9 6 1.7 14.1l4.6 3.6z"/></svg>
+              Continue with Google
+            </button>
+            <p id="su-error" class="hint" style="color:#b91c1c;display:none;margin:8px 0 0"></p>
+          </form>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <!-- Supabase + wiring -->
   <script src="https://unpkg.com/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
   <script>
     document.getElementById('y').textContent = new Date().getFullYear();
@@ -163,83 +222,101 @@
       auth: { persistSession: true, autoRefreshToken: true }
     });
 
+    /* ---------- Modal behaviors (same as index) ---------- */
+    const modal = document.getElementById('authModal');
+    const openers = document.querySelectorAll('.js-open-auth');
+    const scrim = modal.querySelector('.modal__scrim');
+    const closeBtns = modal.querySelectorAll('[data-close]');
+    const tabSignin = document.getElementById('tab-signin');
+    const tabSignup = document.getElementById('tab-signup');
+    const panelSignin = document.getElementById('panel-signin');
+    const panelSignup = document.getElementById('panel-signup');
+
+    let lastFocus = null;
+    function activateTab(which){ const s=which==='signin'; tabSignin.classList.toggle('is-active',s); tabSignup.classList.toggle('is-active',!s); tabSignin.setAttribute('aria-selected',String(s)); tabSignup.setAttribute('aria-selected',String(!s)); panelSignin.hidden=!s; panelSignup.hidden=s; (s?tabSignin:tabSignup).focus(); }
+    function openModal(){ lastFocus=document.activeElement; modal.classList.add('open'); modal.setAttribute('aria-hidden','false'); activateTab('signin'); setTimeout(()=>document.getElementById('si-email')?.focus(),10); trapFocus(true); }
+    function closeModal(){ modal.classList.remove('open'); modal.setAttribute('aria-hidden','true'); trapFocus(false); lastFocus?.focus(); }
+    function trapFocus(on){ if(!on){ document.removeEventListener('keydown',onKeyDown); return; } document.addEventListener('keydown',onKeyDown);
+      function onKeyDown(e){ if(e.key==='Escape') return closeModal(); if(e.key!=='Tab') return;
+        const f = modal.querySelectorAll('button,[href],input,select,textarea,[tabindex]:not([tabindex="-1"])');
+        const arr=[...f].filter(el=>!el.disabled && el.offsetParent!==null); if(!arr.length) return;
+        const first=arr[0], last=arr[arr.length-1];
+        if(e.shiftKey && document.activeElement===first){ e.preventDefault(); last.focus(); }
+        else if(!e.shiftKey && document.activeElement===last){ e.preventDefault(); first.focus(); }
+      }
+    }
+    openers.forEach(b=>b.addEventListener('click',openModal));
+    scrim.addEventListener('click',closeModal);
+    closeBtns.forEach(b=>b.addEventListener('click',closeModal));
+    tabSignin.addEventListener('click',()=>activateTab('signin'));
+    tabSignup.addEventListener('click',()=>activateTab('signup'));
+
+    /* ---------- Header dropdown ---------- */
     const authSlot = document.querySelector('.nav-auth');
-    const goProBtn = document.getElementById('goPro');
-    const manageBtn = document.getElementById('manageBilling');
-
-    function setSignedInUI(user) {
+    function setSignedInUI(user){
       authSlot.replaceChildren();
-
-      if (user) {
-        // show Manage billing
-        manageBtn.style.display = 'block';
-
-        const wrap = document.createElement('div');
-        wrap.className = 'account';
-
-        const trigger = document.createElement('button');
-        trigger.type = 'button';
-        trigger.className = 'btn small ghost';
-        trigger.textContent = user.user_metadata?.name || user.email || 'Account';
-        trigger.setAttribute('aria-haspopup', 'menu');
-        trigger.setAttribute('aria-expanded', 'false');
-
-        const menu = document.createElement('div');
-        menu.className = 'account-menu';
-        menu.setAttribute('role', 'menu');
-
-        const signOut = document.createElement('button');
-        signOut.type = 'button';
-        signOut.className = 'item';
-        signOut.setAttribute('role','menuitem');
-        signOut.textContent = 'Sign out';
-        signOut.addEventListener('click', async () => {
-          await supabaseClient.auth.signOut();
-          hideMenu();
-          manageBtn.style.display = 'none';
-        });
-
-        menu.appendChild(signOut);
-        wrap.append(trigger, menu);
-        authSlot.appendChild(wrap);
-
-        function showMenu(){
-          menu.classList.add('open');
-          trigger.setAttribute('aria-expanded','true');
-          document.addEventListener('click', outside, { capture:true });
-          document.addEventListener('keydown', onKey);
-        }
-        function hideMenu(){
-          menu.classList.remove('open');
-          trigger.setAttribute('aria-expanded','false');
-          document.removeEventListener('click', outside, { capture:true });
-          document.removeEventListener('keydown', onKey);
-        }
-        function toggle(){ menu.classList.contains('open') ? hideMenu() : showMenu(); }
-        function outside(e){ if (!wrap.contains(e.target)) hideMenu(); }
-        function onKey(e){ if (e.key === 'Escape') { hideMenu(); trigger.focus(); } }
-        trigger.addEventListener('click', toggle);
-
+      if(user){
+        const wrap=document.createElement('div'); wrap.className='account';
+        const trigger=document.createElement('button'); trigger.type='button'; trigger.className='btn small ghost'; trigger.textContent=user.user_metadata?.name||user.email||'Account'; trigger.setAttribute('aria-haspopup','menu'); trigger.setAttribute('aria-expanded','false');
+        const menu=document.createElement('div'); menu.className='account-menu'; menu.setAttribute('role','menu');
+        const signOut=document.createElement('button'); signOut.type='button'; signOut.className='item'; signOut.setAttribute('role','menuitem'); signOut.textContent='Sign out';
+        signOut.addEventListener('click', async()=>{ await supabaseClient.auth.signOut(); hideMenu(); manageBtn.style.display='none'; });
+        menu.appendChild(signOut); wrap.append(trigger,menu); authSlot.appendChild(wrap);
+        function showMenu(){ menu.classList.add('open'); trigger.setAttribute('aria-expanded','true'); document.addEventListener('click',outside,{capture:true}); document.addEventListener('keydown',onKey); }
+        function hideMenu(){ menu.classList.remove('open'); trigger.setAttribute('aria-expanded','false'); document.removeEventListener('click',outside,{capture:true}); document.removeEventListener('keydown',onKey); }
+        function toggle(){ menu.classList.contains('open')?hideMenu():showMenu(); }
+        function outside(e){ if(!wrap.contains(e.target)) hideMenu(); }
+        function onKey(e){ if(e.key==='Escape'){ hideMenu(); trigger.focus(); } }
+        trigger.addEventListener('click',toggle);
+        manageBtn.style.display='block';
       } else {
-        manageBtn.style.display = 'none';
-        const b = document.createElement('button');
-        b.type = 'button';
-        b.className = 'btn small ghost js-open-auth';
-        b.textContent = 'Sign in';
-        authSlot.appendChild(b);
+        const b=document.createElement('button'); b.type='button'; b.className='btn small ghost js-open-auth'; b.textContent='Sign in'; b.addEventListener('click',openModal); authSlot.appendChild(b);
+        manageBtn.style.display='none';
       }
     }
 
-    (async () => {
-      const { data: { session } } = await supabaseClient.auth.getSession();
-      setSignedInUI(session?.user || null);
-    })();
-    supabaseClient.auth.onAuthStateChange((_e, s) => setSignedInUI(s?.user||null));
+    // Auth forms
+    const siForm=document.getElementById('formSignIn'), suForm=document.getElementById('formSignUp');
+    const siErr=document.getElementById('si-error'), suErr=document.getElementById('su-error');
+    siForm.addEventListener('submit', async(e)=>{ e.preventDefault(); siErr.style.display='none';
+      const email=document.getElementById('si-email').value.trim(); const password=document.getElementById('si-pass').value;
+      const { error } = await supabaseClient.auth.signInWithPassword({ email, password });
+      if(error){ siErr.textContent=error.message||'Sign in failed'; siErr.style.display='block'; return; } closeModal();
+    });
+    suForm.addEventListener('submit', async(e)=>{ e.preventDefault(); suErr.style.display='none';
+      const name=document.getElementById('su-name').value.trim(); const email=document.getElementById('su-email').value.trim(); const password=document.getElementById('su-pass').value;
+      const { error } = await supabaseClient.auth.signUp({ email, password, options:{ data:{ name } } });
+      if(error){ suErr.textContent=error.message||'Sign up failed'; suErr.style.display='block'; return; } closeModal();
+    });
+    document.getElementById('googleSignIn').addEventListener('click',()=>{ supabaseClient.auth.signInWithOAuth({ provider:'google', options:{ redirectTo: window.location.origin } }); });
+    document.getElementById('googleSignUp').addEventListener('click',()=>{ supabaseClient.auth.signInWithOAuth({ provider:'google', options:{ redirectTo: window.location.origin } }); });
 
-    // === Stripe actions ===
+    // Session/state
+    (async()=>{ const { data:{ session } } = await supabaseClient.auth.getSession(); setSignedInUI(session?.user||null); })();
+    supabaseClient.auth.onAuthStateChange((_e,s)=>setSignedInUI(s?.user||null));
+
+    // Elements
+    const goProBtn = document.getElementById('goPro');
+    const manageBtn = document.getElementById('manageBilling');
+
+    // Gate "Try it out" links when signed out
+    function gateTryItOutLinks(){
+      const links=document.querySelectorAll('a[href$="app.html"]');
+      links.forEach(link=>{
+        link.addEventListener('click', async(e)=>{
+          const { data:{ session } } = await supabaseClient.auth.getSession();
+          if(!session?.user){ e.preventDefault(); openModal(); }
+        });
+      });
+    }
+    document.addEventListener('DOMContentLoaded', gateTryItOutLinks);
+
+    // === Stripe actions (gated) ===
     goProBtn.addEventListener('click', async () => {
-      const { data: { session} } = await supabaseClient.auth.getSession();
-      const body = session?.user ? { email: session.user.email, userId: session.user.id } : {};
+      const { data: { session } } = await supabaseClient.auth.getSession();
+      if (!session?.user) { openModal(); return; }   // <-- prompt sign in first
+
+      const body = { email: session.user.email, userId: session.user.id };
       goProBtn.disabled = true; goProBtn.textContent = 'Redirecting…';
       try {
         const r = await fetch('/api/create-checkout-session', {
@@ -258,7 +335,7 @@
 
     manageBtn.addEventListener('click', async () => {
       const { data: { session } } = await supabaseClient.auth.getSession();
-      if (!session?.user?.email) return alert('Sign in first');
+      if (!session?.user?.email) { openModal(); return; }  // <-- prompt sign in first
       manageBtn.disabled = true; manageBtn.textContent = 'Opening…';
       try {
         const r = await fetch('/api/create-portal-session', {
@@ -275,18 +352,13 @@
       }
     });
 
-    // If they landed via #pro, scroll to the Pro card and add a brief focus ring
+    // If they landed via #pro, highlight & scroll the Pro card
     if (location.hash.toLowerCase() === '#pro') {
       window.addEventListener('DOMContentLoaded', () => {
         const pro = document.getElementById('plan-pro');
-        if (pro) {
-          pro.classList.add('focus');
-          pro.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          setTimeout(() => pro.classList.remove('focus'), 1600);
-        }
+        if (pro) { pro.classList.add('focus'); pro.scrollIntoView({ behavior: 'smooth', block: 'center' }); setTimeout(()=>pro.classList.remove('focus'), 1600); }
       });
     }
   </script>
 </body>
 </html>
-
