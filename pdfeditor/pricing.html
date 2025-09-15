@@ -45,8 +45,15 @@
     .price .per{ font-size:12px; color:var(--muted); }
 
     .price-body{ padding:16px; display:grid; gap:10px; }
-    .feature{ display:flex; gap:8px; align-items:flex-start; color:var(--ink); }
+    .feature{ display:flex; gap:10px; align-items:flex-start; color:var(--ink); }
     .feature .dot{ width:8px; height:8px; border-radius:999px; background:var(--accent); margin-top:7px; }
+    .feature.off{ color:#9aa3af; }
+    .feature .x{
+      width:16px; height:16px; margin-top:3px;
+      display:inline-flex; align-items:center; justify-content:center;
+      font-weight:900; color:#9aa3af;
+      border:1px solid #e5e7eb; border-radius:4px; line-height:1;
+    }
 
     .price-cta{ padding:16px; border-top:1px solid var(--border); background:#fff; }
     .price-cta .btn{ width:100%; }
@@ -95,10 +102,27 @@
         </header>
         <div class="price-body">
           <p class="price"><span class="amount">$0</span><span class="per">/mo</span></p>
-          <div class="feature"><span class="dot"></span><div>Upload single images (up to 2MB)</div></div>
-          <div class="feature"><span class="dot"></span><div>Instant CSS + HTML component</div></div>
-          <div class="feature"><span class="dot"></span><div>Basic palettes & utility classes</div></div>
-          <div class="feature"><span class="dot"></span><div>Local-only — nothing stored</div></div>
+
+          <!-- Your exact lines, styled as features -->
+          <div class="feature">
+            <span class="dot" aria-hidden="true"></span>
+            <div>Access to AI Code Commenter</div>
+          </div>
+
+          <div class="feature off">
+            <span class="x" aria-hidden="true">×</span>
+            <div>Access to image → css</div>
+          </div>
+
+          <div class="feature off">
+            <span class="x" aria-hidden="true">×</span>
+            <div>… Other stuff pro will have</div>
+          </div>
+
+          <div class="feature">
+            <span class="dot" aria-hidden="true"></span>
+            <div>Local-only — nothing stored</div>
+          </div>
         </div>
         <div class="price-cta">
           <a href="app.html" class="btn block">Use Free</a>
@@ -135,13 +159,14 @@
     </div>
   </footer>
 
-  <!-- Auth modal + Supabase logic stays the same -->
+  <!-- (Optional) If you want the auth UI to reflect login state on this page, keep this small script -->
   <script src="https://unpkg.com/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
   <script>
     document.getElementById('y').textContent = new Date().getFullYear();
 
+    // Reuse your project values here:
     const SUPABASE_URL = "https://vsdmfjkhehtagsrvxbav.supabase.co";
-    const SUPABASE_ANON_KEY = "YOUR_KEY";
+    const SUPABASE_ANON_KEY = "YOUR_PUBLIC_ANON_KEY_HERE";
     const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
       auth: { persistSession: true, autoRefreshToken: true }
     });
@@ -152,7 +177,7 @@
       if (user) {
         const btn = document.createElement('button');
         btn.className = 'btn small ghost';
-        btn.textContent = user.user_metadata?.name || user.email;
+        btn.textContent = user.user_metadata?.name || user.email || 'Account';
         btn.onclick = () => supabaseClient.auth.signOut();
         authSlot.appendChild(btn);
       } else {
@@ -160,6 +185,7 @@
         b.type = 'button';
         b.className = 'btn small ghost js-open-auth';
         b.textContent = 'Sign in';
+        // if you have your modal on this page, wire it here
         authSlot.appendChild(b);
       }
     }
@@ -167,7 +193,7 @@
       const { data: { session } } = await supabaseClient.auth.getSession();
       setSignedInUI(session?.user || null);
     })();
-    supabaseClient.auth.onAuthStateChange((_e,s) => setSignedInUI(s?.user||null));
+    supabaseClient.auth.onAuthStateChange((_e, s) => setSignedInUI(s?.user||null));
   </script>
 </body>
 </html>
