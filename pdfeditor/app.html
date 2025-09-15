@@ -8,6 +8,9 @@
   <meta name="theme-color" content="#0f172a"/>
 
   <style>
+    /* Gate: hide UI until Pro check passes */
+    html.gated body { visibility: hidden; }
+
     /* App-specific */
     body.is-app { overflow:auto; }
     .wrap { max-width: 1200px; margin: 28px auto; padding: 0 18px; }
@@ -54,7 +57,7 @@
 
     .pill { background:#eef2ff; color:#312e81; padding:6px 10px; border-radius:999px; font-weight:700; font-size:12px; }
 
-    /* Small account dropdown like index */
+    /* Small account dropdown */
     .account { position: relative; }
     .account-menu{
       position:absolute; top:calc(100% + 6px); right:0;
@@ -69,7 +72,47 @@
     }
     .account-menu .item:hover{ background:#f6f7f9; }
   </style>
+
+  <!-- Supabase UMD (needed early for gating) -->
+  <script src="https://unpkg.com/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+  <script>
+    // Hide page until Pro gate passes
+    document.documentElement.classList.add('gated');
+
+    // Supabase client (public anon key — safe in browser)
+    const SUPABASE_URL = "https://vsdmfjkhehtagsrvxbav.supabase.co";
+    const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZzZG1mamtoZWh0YWdzcnZ4YmF2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc3OTA1NjksImV4cCI6MjA3MzM2NjU2OX0.Xd1VhsuOhJF1iEDaw1JApJ5JigJTODypjogm3hdrXxA";
+    const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      auth: { persistSession: true, autoRefreshToken: true }
+    });
+
+    // Pro gate: redirect non-Pro users to pricing#pro
+    (async () => {
+      try {
+        const { data: { user } } = await supabaseClient.auth.getUser();
+        if (!user) return window.location.replace('pricing.html#pro');
+
+        // Ensure a profile row exists (no-op if present)
+        await supabaseClient.from('profiles').upsert({ id: user.id, email: user.email }).eq('id', user.id);
+
+        const { data: profile, error } = await supabaseClient
+          .from('profiles')
+          .select('pro')
+          .eq('id', user.id)
+          .maybeSingle();
+
+        if (error || !profile?.pro) return window.location.replace('pricing.html#pro');
+
+        // Allow page to render
+        document.documentElement.classList.remove('gated');
+      } catch (_e) {
+        // On any error, fall back to pricing
+        window.location.replace('pricing.html#pro');
+      }
+    })();
+  </script>
 </head>
+
 <body class="is-app">
   <!-- Top bar -->
   <header class="header">
@@ -149,15 +192,8 @@
 
   <div id="loading" class="loading"><div class="spinner" aria-label="Loading"></div></div>
 
-  <!-- Supabase + header auth state (dropdown with Sign out) -->
-  <script src="https://unpkg.com/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+  <!-- Header auth dropdown (same pattern as index/pricing) -->
   <script>
-    const SUPABASE_URL = "https://vsdmfjkhehtagsrvxbav.supabase.co";
-    const SUPABASE_ANON_KEY = "YOUR_PUBLIC_ANON_KEY_HERE";
-    const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-      auth: { persistSession: true, autoRefreshToken: true }
-    });
-
     const authSlot = document.querySelector('.nav-auth');
 
     function setSignedInUI(user) {
@@ -225,6 +261,7 @@
     supabaseClient.auth.onAuthStateChange((_e, s) => setSignedInUI(s?.user||null));
   </script>
 
+  <!-- App logic -->
   <script>
     const drop = document.getElementById('drop');
     const fileInput = document.getElementById('file');
