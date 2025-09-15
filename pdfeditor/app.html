@@ -5,13 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>Image → CSS</title>
   <link rel="stylesheet" href="style.css"/>
+  <meta name="theme-color" content="#0f172a"/>
 
   <style>
     /* App-specific touches (keeps your global style.css intact) */
     body.is-app { overflow:auto; }
     .wrap { max-width: 1200px; margin: 28px auto; padding: 0 18px; }
 
-    .two { display:grid; grid-template-columns: 1.05fr .95fr; gap: 18px; align-items:start; } /* no stretching */
+    .two { display:grid; grid-template-columns: 1.05fr .95fr; gap: 18px; align-items:start; }
     @media (max-width: 980px){ .two { grid-template-columns: 1fr; } }
 
     .panel { background: var(--paper); border:1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
@@ -74,7 +75,26 @@
   </style>
 </head>
 <body class="is-app">
-  <div class="wrap">
+  <!-- Header (same top bar as Pricing) -->
+  <header class="header">
+    <div class="container nav">
+      <a href="/" class="brand">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <b>Image&nbsp;to&nbsp;CSS</b>
+      </a>
+      <nav class="links" aria-label="Primary">
+        <div class="nav-center">
+          <a href="pricing.html">Pricing</a>
+          <a href="app.html" class="btn small primary" aria-current="page">Try it out</a>
+        </div>
+        <div class="nav-auth">
+          <button class="btn small ghost js-open-auth" type="button">Sign in</button>
+        </div>
+      </nav>
+    </div>
+  </header>
+
+  <main class="wrap">
     <h1 style="margin:0 0 8px">Image → CSS</h1>
     <p class="lead">Upload/paste a <b>cropped screenshot of one component</b> (button, card, input). We’ll generate scoped CSS and a matching HTML snippet.</p>
 
@@ -129,10 +149,45 @@
         </div>
       </section>
     </div>
-  </div>
+  </main>
 
   <!-- Loading overlay -->
   <div id="loading" class="loading"><div class="spinner" aria-label="Loading"></div></div>
+
+  <!-- Optional: minimal auth-state reflection so the top-right button updates -->
+  <script src="https://unpkg.com/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+  <script>
+    // Reuse your project values if you want live auth state on this page:
+    const SUPABASE_URL = "https://vsdmfjkhehtagsrvxbav.supabase.co";
+    const SUPABASE_ANON_KEY = "YOUR_PUBLIC_ANON_KEY_HERE";
+    const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      auth: { persistSession: true, autoRefreshToken: true }
+    });
+
+    const authSlot = document.querySelector('.nav-auth');
+    function setSignedInUI(user) {
+      if (!authSlot) return;
+      authSlot.replaceChildren();
+      if (user) {
+        const btn = document.createElement('button');
+        btn.className = 'btn small ghost';
+        btn.textContent = user.user_metadata?.name || user.email || 'Account';
+        btn.onclick = () => supabaseClient.auth.signOut();
+        authSlot.appendChild(btn);
+      } else {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'btn small ghost js-open-auth';
+        b.textContent = 'Sign in';
+        authSlot.appendChild(b);
+      }
+    }
+    (async () => {
+      const { data: { session } } = await supabaseClient.auth.getSession();
+      setSignedInUI(session?.user || null);
+    })();
+    supabaseClient.auth.onAuthStateChange((_e, s) => setSignedInUI(s?.user||null));
+  </script>
 
   <script>
     const drop = document.getElementById('drop');
