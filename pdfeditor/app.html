@@ -8,7 +8,6 @@
   <meta name="theme-color" content="#0f172a"/>
 
   <style>
-    /* App-specific touches (keeps your global style.css intact) */
     body.is-app { overflow:auto; }
     .wrap { max-width: 1200px; margin: 28px auto; padding: 0 18px; }
 
@@ -29,53 +28,34 @@
     .drop .empty { color: var(--muted); }
     .drop .btnrow { margin-top: 10px; display:flex; gap:10px; justify-content:center; }
 
-    /* When an image exists: show image, hide empty overlay, let box shrink to content */
     .drop.has-img img.preview { display: block; }
     .drop.has-img .empty { display: none; }
     .drop.has-img { min-height: auto; }
 
-    /* Hover overlay to change image (only when an image exists) */
-    .change-overlay {
-      position:absolute; inset:0; display:none;
-      background: rgba(15,23,42,.22);
-      border-radius: 10px;
-      align-items:center; justify-content:center;
-    }
+    .change-overlay { position:absolute; inset:0; display:none; background: rgba(15,23,42,.22); border-radius: 10px; align-items:center; justify-content:center; }
     .drop.has-img:hover .change-overlay { display:flex; }
     .change-overlay .btn { background: #fff; }
 
-    /* Form row */
     .formgrid { display:grid; grid-template-columns: 1fr auto; gap:12px; align-items:end; margin-top:12px; }
     @media (max-width: 720px){ .formgrid { grid-template-columns: 1fr; } }
 
     .input { width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:10px; background:#fff; outline:none; }
     .label { font-size:13px; color:var(--muted); margin-bottom:6px; font-weight:700; display:block; }
 
-    /* Output code areas (fixed heights so layout doesn't jump) */
     .codebox { position:relative; }
     .codebox .copy { position:absolute; top:10px; right:10px; }
     .code { height: 360px; white-space: pre; tab-size: 2; }
 
-    /* Loading overlay */
-    .loading {
-      position: fixed; inset: 0; background: rgba(255,255,255,.6);
-      display: none; z-index: 50; align-items:center; justify-content:center;
-      backdrop-filter: blur(2px);
-    }
+    .loading { position: fixed; inset: 0; background: rgba(255,255,255,.6); display: none; z-index: 50; align-items:center; justify-content:center; backdrop-filter: blur(2px); }
     .loading.on { display: flex; }
-    .spinner {
-      width: 42px; height: 42px;
-      border: 4px solid #c7d2fe; border-top-color: var(--accent);
-      border-radius: 50%; animation: spin 0.9s linear infinite;
-    }
+    .spinner { width: 42px; height: 42px; border: 4px solid #c7d2fe; border-top-color: var(--accent); border-radius: 50%; animation: spin 0.9s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
 
-    /* Small pill for API status */
     .pill { background:#eef2ff; color:#312e81; padding:6px 10px; border-radius:999px; font-weight:700; font-size:12px; }
   </style>
 </head>
 <body class="is-app">
-  <!-- Header (same top bar as Pricing) -->
+  <!-- Header (same pattern as index: click name = sign out) -->
   <header class="header">
     <div class="container nav">
       <a href="/" class="brand">
@@ -99,7 +79,7 @@
     <p class="lead">Upload/paste a <b>cropped screenshot of one component</b> (button, card, input). We’ll generate scoped CSS and a matching HTML snippet.</p>
 
     <div class="two">
-      <!-- LEFT: input -->
+      <!-- LEFT -->
       <section class="panel pad" style="align-self:start">
         <div class="drop" id="drop">
           <img id="preview" class="preview" alt="preview"/>
@@ -134,7 +114,7 @@
         </div>
       </section>
 
-      <!-- RIGHT: outputs -->
+      <!-- RIGHT -->
       <section class="panel pad">
         <div class="codebox">
           <div class="h">Final CSS</div>
@@ -151,13 +131,11 @@
     </div>
   </main>
 
-  <!-- Loading overlay -->
   <div id="loading" class="loading"><div class="spinner" aria-label="Loading"></div></div>
 
-  <!-- Optional: minimal auth-state reflection so the top-right button updates -->
+  <!-- Supabase auth state for header; click name => signOut -->
   <script src="https://unpkg.com/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
   <script>
-    // Reuse your project values if you want live auth state on this page:
     const SUPABASE_URL = "https://vsdmfjkhehtagsrvxbav.supabase.co";
     const SUPABASE_ANON_KEY = "YOUR_PUBLIC_ANON_KEY_HERE";
     const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
@@ -166,12 +144,12 @@
 
     const authSlot = document.querySelector('.nav-auth');
     function setSignedInUI(user) {
-      if (!authSlot) return;
       authSlot.replaceChildren();
       if (user) {
         const btn = document.createElement('button');
         btn.className = 'btn small ghost';
         btn.textContent = user.user_metadata?.name || user.email || 'Account';
+        btn.title = 'Click to sign out';
         btn.onclick = () => supabaseClient.auth.signOut();
         authSlot.appendChild(btn);
       } else {
@@ -179,6 +157,7 @@
         b.type = 'button';
         b.className = 'btn small ghost js-open-auth';
         b.textContent = 'Sign in';
+        b.onclick = () => alert('Open your auth modal here if needed.');
         authSlot.appendChild(b);
       }
     }
@@ -221,7 +200,6 @@
       imgStatus.textContent = dataUrl ? "Image loaded" : "No image selected";
     }
 
-    // Load from file
     chooseBtn.addEventListener('click', () => fileInput.click());
     drop.querySelector('.change-overlay').addEventListener('click', () => fileInput.click());
     fileInput.addEventListener('change', (e) => {
@@ -232,7 +210,6 @@
       r.readAsDataURL(f);
     });
 
-    // Drag & drop
     ;['dragenter','dragover'].forEach(evt =>
       drop.addEventListener(evt, e => { e.preventDefault(); drop.classList.add('drag'); })
     );
@@ -247,7 +224,6 @@
       r.readAsDataURL(f);
     });
 
-    // Paste
     pasteBtn.addEventListener('click', async () => {
       try {
         const items = await navigator.clipboard.read();
@@ -265,7 +241,6 @@
       } catch { alert("Clipboard not allowed here"); }
     });
 
-    // Clear
     clearBtn.addEventListener('click', () => {
       setPreview("");
       outCss.textContent = "";
@@ -273,17 +248,11 @@
       setStatus("—");
     });
 
-    // ===== Pretty-printers =====
     function formatCSS(css) {
       if (!css) return "";
-      css = css
-        .replace(/\s*{\s*/g, " {\n")
-        .replace(/;\s*/g, ";\n")
-        .replace(/\s*}\s*/g, "\n}\n")
-        .replace(/\n{2,}/g, "\n");
+      css = css.replace(/\s*{\s*/g, " {\n").replace(/;\s*/g, ";\n").replace(/\s*}\s*/g, "\n}\n").replace(/\n{2,}/g, "\n");
       const lines = css.trim().split("\n");
-      let depth = 0;
-      const out = [];
+      let depth = 0; const out = [];
       for (let line of lines) {
         const trimmed = line.trim();
         if (trimmed === "}") depth = Math.max(0, depth - 1);
@@ -295,25 +264,14 @@
 
     function formatHTML(html) {
       if (!html) return "";
-      const tokens = html
-        .replace(/></g, ">\n<")
-        .split("\n")
-        .map(s => s.trim())
-        .filter(Boolean);
-
-      const out = [];
-      let depth = 0;
-      const voids = new Set([
-        "area","base","br","col","embed","hr","img","input","link",
-        "meta","param","source","track","wbr"
-      ]);
-
+      const tokens = html.replace(/></g, ">\n<").split("\n").map(s => s.trim()).filter(Boolean);
+      const out = []; let depth = 0;
+      const voids = new Set(["area","base","br","col","embed","hr","img","input","link","meta","param","source","track","wbr"]);
       for (let t of tokens) {
         const isClose = /^<\//.test(t);
         const isOpen = /^<[^/!][^>]*?>$/.test(t) && !/\/>$/.test(t);
         const tagMatch = t.match(/^<\/?([a-zA-Z0-9-]+)/);
         const tag = tagMatch ? tagMatch[1].toLowerCase() : null;
-
         if (isClose) depth = Math.max(0, depth - 1);
         out.push("  ".repeat(depth) + t);
         if (isOpen && tag && !voids.has(tag)) depth++;
@@ -321,27 +279,19 @@
       return out.join("\n").trim();
     }
 
-    // Generate
-    goBtn.addEventListener('click', async () => {
+    document.getElementById('go').addEventListener('click', async () => {
       if (!dataUrl) { alert("Select or paste an image first"); return; }
       const scope = scopeEl.value.trim() || ".comp";
-      const component = ""; // removed from UI per request
+      const component = "";
 
-      setLoading(true);
-      setStatus("…");
-      outCss.textContent = "";
-      outHtml.textContent = "";
+      setLoading(true); setStatus("…");
+      outCss.textContent = ""; outHtml.textContent = "";
 
       try {
         const r = await fetch("/api/generate-css", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            image: dataUrl,
-            scope,
-            component,
-            double_checks: 1
-          })
+          body: JSON.stringify({ image: dataUrl, scope, component, double_checks: 1 })
         });
 
         const ok = r.ok;
@@ -350,16 +300,12 @@
 
         if (!ok) {
           outCss.textContent = "/* Error — no CSS */";
-          outHtml.textContent = "/* Error — no HTML */\n" + pretty(payload);
+          outHtml.textContent = "/* Error — no HTML */\n" + JSON.stringify(payload, null, 2);
           return;
         }
 
-        const prettyCss = formatCSS(payload.css || "");
-        const prettyHtml = formatHTML(payload.html || "");
-
-        outCss.textContent = prettyCss || "/* No CSS returned */";
-        outHtml.textContent = prettyHtml || "/* No HTML returned */";
-
+        outCss.textContent = formatCSS(payload.css || "") || "/* No CSS returned */";
+        outHtml.textContent = formatHTML(payload.html || "") || "/* No HTML returned */";
       } catch (e) {
         setStatus("Fetch error");
         outCss.textContent = "/* Network error */";
@@ -369,7 +315,6 @@
       }
     });
 
-    // Copy buttons
     copyCssBtn.addEventListener('click', async () => {
       const t = outCss.textContent || "";
       if (!t.trim()) return;
@@ -380,9 +325,6 @@
       if (!t.trim()) return;
       try { await navigator.clipboard.writeText(t); copyHtmlBtn.textContent = "Copied!"; setTimeout(()=>copyHtmlBtn.textContent="Copy", 900); } catch {}
     });
-
-    // Utils
-    function pretty(obj){ try { return JSON.stringify(obj, null, 2); } catch { return String(obj); } }
   </script>
 </body>
 </html>
