@@ -146,13 +146,13 @@
     </div>
   </footer>
 
-  <!-- Supabase + auth dropdown + Stripe wiring -->
+  <!-- Supabase + header auth dropdown + Stripe wiring -->
   <script src="https://unpkg.com/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
   <script>
     document.getElementById('y').textContent = new Date().getFullYear();
 
     const SUPABASE_URL = "https://vsdmfjkhehtagsrvxbav.supabase.co";
-    const SUPABASE_ANON_KEY = "YOUR_PUBLIC_ANON_KEY_HERE";
+    const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZzZG1mamtoZWh0YWdzcnZ4YmF2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc3OTA1NjksImV4cCI6MjA3MzM2NjU2OX0.Xd1VhsuOhJF1iEDaw1JApJ5JigJTODypjogm3hdrXxA";
     const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
       auth: { persistSession: true, autoRefreshToken: true }
     });
@@ -232,8 +232,7 @@
 
     // === Stripe actions ===
     goProBtn.addEventListener('click', async () => {
-      // We’ll include email & uid if logged in (helps you find/create the Stripe customer server-side)
-      const { data: { session } } = await supabaseClient.auth.getSession();
+      const { data: { session} } = await supabaseClient.auth.getSession();
       const body = session?.user ? { email: session.user.email, userId: session.user.id } : {};
       goProBtn.disabled = true; goProBtn.textContent = 'Redirecting…';
       try {
