@@ -1,6 +1,16 @@
 {
   "name": "image-to-css",
   "private": true,
+  "version": "0.0.0",
   "type": "module",
-  "dependencies": { "openai": "^4.57.0" }
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "vercel-build": "echo \"Nothing to build\""
+  },
+  "dependencies": {
+    "openai": "^4.57.0",
+    "stripe": "^16.8.0"
+  }
 }
