@@ -67,6 +67,12 @@
       background:transparent; border:0; padding:10px 10px; border-radius:8px; cursor:pointer;
     }
     .account-menu .item:hover{ background:#f6f7f9; }
+
+    /* Tiny focus ring when arriving via #pro */
+    .price-card.focus { outline:2px solid var(--accent); outline-offset:2px; }
+
+    /* ✅ missing before: run the entrance animation */
+    @keyframes fadeUp { to { opacity:1; transform: translateY(0); } }
   </style>
 </head>
 <body>
@@ -98,7 +104,7 @@
 
     <section class="pricing-grid">
       <!-- Free -->
-      <article class="price-card">
+      <article class="price-card" id="plan-free">
         <header class="price-head">
           <h2 class="plan-name">Free</h2>
           <span class="plan-tag">Start here</span>
@@ -117,7 +123,7 @@
       </article>
 
       <!-- Pro -->
-      <article class="price-card">
+      <article class="price-card" id="plan-pro">
         <header class="price-head">
           <h2 class="plan-name">Pro</h2>
           <span class="plan-tag">Popular</span>
@@ -268,6 +274,18 @@
         manageBtn.disabled = false; manageBtn.textContent = 'Manage billing';
       }
     });
+
+    // If they landed via #pro, scroll to the Pro card and add a brief focus ring
+    if (location.hash.toLowerCase() === '#pro') {
+      window.addEventListener('DOMContentLoaded', () => {
+        const pro = document.getElementById('plan-pro');
+        if (pro) {
+          pro.classList.add('focus');
+          pro.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          setTimeout(() => pro.classList.remove('focus'), 1600);
+        }
+      });
+    }
   </script>
 </body>
 </html>
