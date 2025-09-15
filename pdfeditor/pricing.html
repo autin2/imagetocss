@@ -46,12 +46,7 @@
     .feature{ display:flex; gap:10px; align-items:flex-start; color:var(--ink); }
     .feature .dot{ width:8px; height:8px; border-radius:999px; background:var(--accent); margin-top:7px; }
     .feature.off{ color:#9aa3af; }
-    .feature .x{
-      width:16px; height:16px; margin-top:3px;
-      display:inline-flex; align-items:center; justify-content:center;
-      font-weight:900; color:#9aa3af;
-      border:1px solid #e5e7eb; border-radius:4px; line-height:1;
-    }
+    .feature .x{ width:16px; height:16px; margin-top:3px; display:inline-flex; align-items:center; justify-content:center; font-weight:900; color:#9aa3af; border:1px solid #e5e7eb; border-radius:4px; line-height:1; }
 
     .price-cta{ padding:16px; border-top:1px solid var(--border); background:#fff; }
     .price-cta .btn{ width:100%; }
@@ -83,12 +78,11 @@
 
   <main style="padding-bottom:40px">
     <section class="pricing-hero container">
-      <span class="kicker"><span class="k-dot" aria-hidden="true"></span>Trusted by 100+ Users</span>
+      <span class="kicker"><span class="k-dot" aria-hidden="true"></span> Fair & simple pricing</span>
       <h1>Pick a plan, build faster</h1>
       <p class="lead">Start free. Upgrade when you want higher limits, cloud saves, and pro-grade exports.</p>
     </section>
 
-    <!-- Pricing cards -->
     <section class="pricing-grid">
       <!-- Free -->
       <article class="price-card">
@@ -99,22 +93,18 @@
         <div class="price-body">
           <p class="price"><span class="amount">$0</span><span class="per">/mo</span></p>
 
-          <!-- EXACT TEXT & ORDER (FREE) -->
           <div class="feature">
             <span class="dot" aria-hidden="true"></span>
             <div>Access to AI Code Commenter</div>
           </div>
-
           <div class="feature off">
             <span class="x" aria-hidden="true">×</span>
             <div>Local-only — nothing stored</div>
           </div>
-
           <div class="feature off">
             <span class="x" aria-hidden="true">×</span>
             <div>Access to image → css</div>
           </div>
-
           <div class="feature off">
             <span class="x" aria-hidden="true">×</span>
             <div>Higher limits (10MB), faster queue</div>
@@ -129,16 +119,14 @@
       <article class="price-card">
         <header class="price-head">
           <h2 class="plan-name">Pro</h2>
-          <span class="plan-tag">Most Popular</span>
+          <span class="plan-tag">Popular</span>
         </header>
         <div class="price-body">
           <p class="price"><span class="amount">$12</span><span class="per">/mo</span></p>
-
-          <!-- EXACT TEXT (PRO) -->
-          <div class="feature"><span class="dot" aria-hidden="true"></span><div>Access to Image &gt; CSS Generator</div></div>
-          <div class="feature"><span class="dot" aria-hidden="true"></span><div>Access to AI Code Commenter</div></div>
-          <div class="feature"><span class="dot" aria-hidden="true"></span><div>24/h Email Support</div></div>
-          <div class="feature"><span class="dot" aria-hidden="true"></span><div>Higher limits (10MB), faster queue</div></div>
+          <div class="feature"><span class="dot"></span><div>Access to Image &gt; CSS Generator</div></div>
+          <div class="feature"><span class="dot"></span><div>Access to AI Code Commenter</div></div>
+          <div class="feature"><span class="dot"></span><div>24/h Email Support</div></div>
+          <div class="feature"><span class="dot"></span><div>Higher limits (10MB), faster queue</div></div>
         </div>
         <div class="price-cta">
           <button class="btn primary block js-open-auth" type="button">Go Pro</button>
@@ -156,7 +144,7 @@
     </div>
   </footer>
 
-  <!-- Minimal auth-state reflection -->
+  <!-- Minimal auth-state reflection identical to index behavior -->
   <script src="https://unpkg.com/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
   <script>
     document.getElementById('y').textContent = new Date().getFullYear();
@@ -174,6 +162,7 @@
         const btn = document.createElement('button');
         btn.className = 'btn small ghost';
         btn.textContent = user.user_metadata?.name || user.email || 'Account';
+        btn.title = 'Click to sign out';
         btn.onclick = () => supabaseClient.auth.signOut();
         authSlot.appendChild(btn);
       } else {
@@ -192,5 +181,3 @@
   </script>
 </body>
 </html>
-
-
