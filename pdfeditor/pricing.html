@@ -48,14 +48,12 @@
     .feature.off{ color:#9aa3af; }
     .feature .x{ width:16px; height:16px; margin-top:3px; display:inline-flex; align-items:center; justify-content:center; font-weight:900; color:#9aa3af; border:1px solid #e5e7eb; border-radius:4px; line-height:1; }
 
-    .price-cta{ padding:16px; border-top:1px solid var(--border); background:#fff; }
+    .price-cta{ padding:16px; border-top:1px solid var(--border); background:#fff; display:grid; gap:8px; }
     .price-cta .btn{ width:100%; }
 
     .note{ text-align:center; color:var(--muted); font-size:12px; }
 
-    @keyframes fadeUp{ to{ opacity:1; transform: translateY(0); } }
-
-    /* Account dropdown (same as app/index) */
+    /* Account dropdown (matches index/app) */
     .account { position: relative; }
     .account-menu{
       position:absolute; top:calc(100% + 6px); right:0;
@@ -132,7 +130,8 @@
           <div class="feature"><span class="dot"></span><div>Higher limits (10MB), faster queue</div></div>
         </div>
         <div class="price-cta">
-          <button class="btn primary block js-open-auth" type="button">Go Pro</button>
+          <button id="goPro" class="btn primary block" type="button">Go Pro</button>
+          <button id="manageBilling" class="btn ghost block" type="button" style="display:none">Manage billing</button>
         </div>
       </article>
     </section>
@@ -147,7 +146,7 @@
     </div>
   </footer>
 
-  <!-- Supabase + header auth dropdown like index -->
+  <!-- Supabase + auth dropdown + Stripe wiring -->
   <script src="https://unpkg.com/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
   <script>
     document.getElementById('y').textContent = new Date().getFullYear();
@@ -159,11 +158,16 @@
     });
 
     const authSlot = document.querySelector('.nav-auth');
+    const goProBtn = document.getElementById('goPro');
+    const manageBtn = document.getElementById('manageBilling');
 
     function setSignedInUI(user) {
       authSlot.replaceChildren();
 
       if (user) {
+        // show Manage billing
+        manageBtn.style.display = 'block';
+
         const wrap = document.createElement('div');
         wrap.className = 'account';
 
@@ -186,6 +190,7 @@
         signOut.addEventListener('click', async () => {
           await supabaseClient.auth.signOut();
           hideMenu();
+          manageBtn.style.display = 'none';
         });
 
         menu.appendChild(signOut);
@@ -207,9 +212,10 @@
         function toggle(){ menu.classList.contains('open') ? hideMenu() : showMenu(); }
         function outside(e){ if (!wrap.contains(e.target)) hideMenu(); }
         function onKey(e){ if (e.key === 'Escape') { hideMenu(); trigger.focus(); } }
-
         trigger.addEventListener('click', toggle);
+
       } else {
+        manageBtn.style.display = 'none';
         const b = document.createElement('button');
         b.type = 'button';
         b.className = 'btn small ghost js-open-auth';
@@ -223,6 +229,46 @@
       setSignedInUI(session?.user || null);
     })();
     supabaseClient.auth.onAuthStateChange((_e, s) => setSignedInUI(s?.user||null));
+
+    // === Stripe actions ===
+    goProBtn.addEventListener('click', async () => {
+      // We’ll include email & uid if logged in (helps you find/create the Stripe customer server-side)
+      const { data: { session } } = await supabaseClient.auth.getSession();
+      const body = session?.user ? { email: session.user.email, userId: session.user.id } : {};
+      goProBtn.disabled = true; goProBtn.textContent = 'Redirecting…';
+      try {
+        const r = await fetch('/api/create-checkout-session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        const payload = await r.json();
+        if (!r.ok) throw new Error(payload.error || 'Checkout init failed');
+        window.location.href = payload.url;
+      } catch (err) {
+        alert(err.message || 'Unable to start checkout');
+        goProBtn.disabled = false; goProBtn.textContent = 'Go Pro';
+      }
+    });
+
+    manageBtn.addEventListener('click', async () => {
+      const { data: { session } } = await supabaseClient.auth.getSession();
+      if (!session?.user?.email) return alert('Sign in first');
+      manageBtn.disabled = true; manageBtn.textContent = 'Opening…';
+      try {
+        const r = await fetch('/api/create-portal-session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: session.user.email })
+        });
+        const payload = await r.json();
+        if (!r.ok) throw new Error(payload.error || 'Could not open billing portal');
+        window.location.href = payload.url;
+      } catch (e) {
+        alert(e.message || 'No billing profile found for this email.');
+        manageBtn.disabled = false; manageBtn.textContent = 'Manage billing';
+      }
+    });
   </script>
 </body>
 </html>
