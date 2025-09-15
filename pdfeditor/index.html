@@ -272,15 +272,19 @@
     tabSignin.addEventListener('click', () => activateTab('signin'));
     tabSignup.addEventListener('click', () => activateTab('signup'));
 
-    // ---- Header UI swap (Sign in ↔ user) with dropdown ----
+    // ---- Header UI swap (Sign in ↔ user) with right-anchored dropdown ----
     const authSlot = document.querySelector('.nav-auth');
     let closeAccountMenuHandler = null;
 
     function setSignedInUI(user) {
+      // Clear current content of auth slot
       authSlot.replaceChildren();
 
       if (user) {
-        const wrap = document.createElement('div'); wrap.className = 'account';
+        // build dropdown
+        const wrap = document.createElement('div');
+        wrap.className = 'account';
+
         const trigger = document.createElement('button');
         trigger.type = 'button';
         trigger.className = 'btn small ghost account-btn';
@@ -288,25 +292,55 @@
         trigger.setAttribute('aria-expanded', 'false');
         trigger.textContent = user.user_metadata?.name || user.email || 'Account';
 
-        const menu = document.createElement('div'); menu.className = 'account-menu'; menu.setAttribute('role', 'menu');
+        const menu = document.createElement('div');
+        menu.className = 'account-menu';
+        menu.setAttribute('role', 'menu');
+
         const signOut = document.createElement('button');
-        signOut.type = 'button'; signOut.className = 'item'; signOut.setAttribute('role', 'menuitem'); signOut.textContent = 'Sign out';
-        signOut.addEventListener('click', async () => { await supabaseClient.auth.signOut(); hideMenu(); });
+        signOut.type = 'button';
+        signOut.className = 'item';
+        signOut.setAttribute('role', 'menuitem');
+        signOut.textContent = 'Sign out';
+        signOut.addEventListener('click', async () => {
+          await supabaseClient.auth.signOut();
+          hideMenu();
+        });
 
-        menu.appendChild(signOut); wrap.appendChild(trigger); wrap.appendChild(menu); authSlot.appendChild(wrap);
+        menu.appendChild(signOut);
+        wrap.appendChild(trigger);
+        wrap.appendChild(menu);
+        authSlot.appendChild(wrap);
 
-        function showMenu(){ menu.classList.add('open'); trigger.setAttribute('aria-expanded','true'); document.addEventListener('click', outside, { capture:true }); document.addEventListener('keydown', onKey); }
-        function hideMenu(){ menu.classList.remove('open'); trigger.setAttribute('aria-expanded','false'); document.removeEventListener('click', outside, { capture:true }); document.removeEventListener('keydown', onKey); }
+        // menu logic
+        function showMenu(){
+          menu.classList.add('open');
+          trigger.setAttribute('aria-expanded','true');
+          document.addEventListener('click', outside, { capture:true });
+          document.addEventListener('keydown', onKey);
+          closeAccountMenuHandler = hideMenu;
+        }
+        function hideMenu(){
+          menu.classList.remove('open');
+          trigger.setAttribute('aria-expanded','false');
+          document.removeEventListener('click', outside, { capture:true });
+          document.removeEventListener('keydown', onKey);
+          closeAccountMenuHandler = null;
+        }
         function toggle(){ menu.classList.contains('open') ? hideMenu() : showMenu(); }
         function outside(e){ if (!wrap.contains(e.target)) hideMenu(); }
         function onKey(e){ if (e.key === 'Escape') { hideMenu(); trigger.focus(); } }
+
         trigger.addEventListener('click', toggle);
-        closeAccountMenuHandler = hideMenu;
       } else {
+        // Signed out → restore Sign in button in the right slot
         const btn = document.createElement('button');
-        btn.type = 'button'; btn.className = 'btn small ghost js-open-auth'; btn.textContent = 'Sign in';
+        btn.type = 'button';
+        btn.className = 'btn small ghost js-open-auth';
+        btn.textContent = 'Sign in';
         btn.addEventListener('click', openModal);
         authSlot.appendChild(btn);
+
+        // close any leftover menu
         if (closeAccountMenuHandler) closeAccountMenuHandler();
       }
     }
@@ -323,7 +357,11 @@
       const email = document.getElementById('si-email').value.trim();
       const password = document.getElementById('si-pass').value;
       const { error } = await supabaseClient.auth.signInWithPassword({ email, password });
-      if (error) { siErr.textContent = error.message || 'Sign in failed'; siErr.style.display = 'block'; return; }
+      if (error) {
+        siErr.textContent = error.message || 'Sign in failed';
+        siErr.style.display = 'block';
+        return;
+      }
       closeModal();
     });
 
@@ -333,16 +371,29 @@
       const name = document.getElementById('su-name').value.trim();
       const email = document.getElementById('su-email').value.trim();
       const password = document.getElementById('su-pass').value;
-      const { error } = await supabaseClient.auth.signUp({ email, password, options: { data: { name } } });
-      if (error) { suErr.textContent = error.message || 'Sign up failed'; suErr.style.display = 'block'; return; }
+      const { error } = await supabaseClient.auth.signUp({
+        email, password,
+        options: { data: { name } }
+      });
+      if (error) {
+        suErr.textContent = error.message || 'Sign up failed';
+        suErr.style.display = 'block';
+        return;
+      }
       closeModal();
     });
 
     document.getElementById('googleSignIn').addEventListener('click', () => {
-      supabaseClient.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: window.location.origin } });
+      supabaseClient.auth.signInWithOAuth({
+        provider: 'google',
+        options: { redirectTo: window.location.origin }
+      });
     });
     document.getElementById('googleSignUp').addEventListener('click', () => {
-      supabaseClient.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: window.location.origin } });
+      supabaseClient.auth.signInWithOAuth({
+        provider: 'google',
+        options: { redirectTo: window.location.origin }
+      });
     });
 
     // ---- Session / state ----
@@ -350,22 +401,32 @@
       const { data: { session } } = await supabaseClient.auth.getSession();
       setSignedInUI(session?.user || null);
     })();
-    supabaseClient.auth.onAuthStateChange((_event, session) => { setSignedInUI(session?.user || null); });
 
-    // ---- Gate "Try it out" links when signed out ----
-    function gateTryItOutLinks() {
-      const links = document.querySelectorAll('a[href$="app.html"]');
-      links.forEach(link => {
-        link.addEventListener('click', async (e) => {
-          const { data: { session } } = await supabaseClient.auth.getSession();
-          if (!session?.user) {
-            e.preventDefault();
-            openModal();
-          }
-        });
-      });
-    }
-    document.addEventListener('DOMContentLoaded', gateTryItOutLinks);
+    supabaseClient.auth.onAuthStateChange((_event, session) => {
+      setSignedInUI(session?.user || null);
+    });
+
+    // ---- Gate links to app.html (prevent immediate navigation if signed out) ----
+    (function gateAppLinks(){
+      async function onDocClick(e){
+        const a = e.target.closest('a[href$="app.html"]');
+        if (!a) return;
+
+        // Allow new tab/window behaviors
+        if (e.metaKey || e.ctrlKey || e.shiftKey || e.button === 1) return;
+
+        // Block navigation FIRST
+        e.preventDefault();
+
+        const { data: { session } } = await supabaseClient.auth.getSession();
+        if (session?.user) {
+          window.location.href = a.href;
+        } else {
+          openModal();
+        }
+      }
+      document.addEventListener('click', onDocClick, { capture: true });
+    })();
   </script>
 </body>
 </html>
