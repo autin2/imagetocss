@@ -33,14 +33,12 @@
     .price-head{
       padding:18px; border-bottom:1px solid var(--border);
       display:flex; align-items:baseline; justify-content:space-between; gap:10px;
-      background: #fbfbfc;
+      background:#fbfbfc;
     }
     .plan-name{ font-weight:800; font-size:18px; margin:0; }
     .plan-tag{ font-size:12px; color:#0b3b4f; background:#e6f6fd; border:1px solid #c8e9f8; border-radius:999px; padding:4px 8px; font-weight:700; }
 
-    .price{
-      display:flex; align-items:baseline; gap:6px; margin:0; font-weight:900; color:var(--ink);
-    }
+    .price{ display:flex; align-items:baseline; gap:6px; margin:0; font-weight:900; color:var(--ink); }
     .price .amount{ font-size:34px; line-height:1; }
     .price .per{ font-size:12px; color:var(--muted); }
 
@@ -60,9 +58,7 @@
 
     .note{ text-align:center; color:var(--muted); font-size:12px; }
 
-    @keyframes fadeUp{
-      to{ opacity:1; transform: translateY(0); }
-    }
+    @keyframes fadeUp{ to{ opacity:1; transform: translateY(0); } }
   </style>
 </head>
 <body>
@@ -103,10 +99,15 @@
         <div class="price-body">
           <p class="price"><span class="amount">$0</span><span class="per">/mo</span></p>
 
-          <!-- Your exact lines, styled as features -->
+          <!-- EXACT TEXT & ORDER (FREE) -->
           <div class="feature">
             <span class="dot" aria-hidden="true"></span>
             <div>Access to AI Code Commenter</div>
+          </div>
+
+          <div class="feature off">
+            <span class="x" aria-hidden="true">×</span>
+            <div>Local-only — nothing stored</div>
           </div>
 
           <div class="feature off">
@@ -116,12 +117,7 @@
 
           <div class="feature off">
             <span class="x" aria-hidden="true">×</span>
-            <div>… Other stuff pro will have</div>
-          </div>
-
-          <div class="feature">
-            <span class="dot" aria-hidden="true"></span>
-            <div>Local-only — nothing stored</div>
+            <div>Higher limits (10MB), faster queue</div>
           </div>
         </div>
         <div class="price-cta">
@@ -137,11 +133,12 @@
         </header>
         <div class="price-body">
           <p class="price"><span class="amount">$12</span><span class="per">/mo</span></p>
-          <div class="feature"><span class="dot"></span><div>Higher limits (10MB), faster queue</div></div>
-          <div class="feature"><span class="dot"></span><div>Save & manage palettes in the cloud</div></div>
-          <div class="feature"><span class="dot"></span><div>Brand tokens & component presets</div></div>
-          <div class="feature"><span class="dot"></span><div>Export to CSS Modules / Tailwind</div></div>
-          <div class="feature"><span class="dot"></span><div>Email support</div></div>
+
+          <!-- EXACT TEXT (PRO) -->
+          <div class="feature"><span class="dot" aria-hidden="true"></span><div>Access to Image &gt; CSS Generator</div></div>
+          <div class="feature"><span class="dot" aria-hidden="true"></span><div>Access to AI Code Commenter</div></div>
+          <div class="feature"><span class="dot" aria-hidden="true"></span><div>24/h Email Support</div></div>
+          <div class="feature"><span class="dot" aria-hidden="true"></span><div>Higher limits (10MB), faster queue</div></div>
         </div>
         <div class="price-cta">
           <button class="btn primary block js-open-auth" type="button">Go Pro</button>
@@ -159,12 +156,11 @@
     </div>
   </footer>
 
-  <!-- (Optional) If you want the auth UI to reflect login state on this page, keep this small script -->
+  <!-- Minimal auth-state reflection -->
   <script src="https://unpkg.com/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
   <script>
     document.getElementById('y').textContent = new Date().getFullYear();
 
-    // Reuse your project values here:
     const SUPABASE_URL = "https://vsdmfjkhehtagsrvxbav.supabase.co";
     const SUPABASE_ANON_KEY = "YOUR_PUBLIC_ANON_KEY_HERE";
     const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
@@ -185,7 +181,6 @@
         b.type = 'button';
         b.className = 'btn small ghost js-open-auth';
         b.textContent = 'Sign in';
-        // if you have your modal on this page, wire it here
         authSlot.appendChild(b);
       }
     }
