@@ -7,6 +7,45 @@
   <meta name="description" content="Upload an image, get production-ready CSS: color variables, utilities, and component tokens. Private by default, runs in your browser. Accounts & Pro features available."/>
   <link rel="stylesheet" href="style.css"/>
   <meta name="theme-color" content="#0f172a"/>
+
+  <!-- Promo toast styles (scoped to index only) -->
+  <style>
+    .promo-toast{
+      position: fixed; right: 20px; bottom: 20px; z-index: 2000;
+      width: min(92vw, 380px);
+      border-radius: 14px;
+      display: none;
+      animation: promo-in .25s ease-out both;
+    }
+    .promo-toast.open{ display:block; }
+    .promo-title{ font-weight:800; margin:0 26px 6px 0; }
+    .promo-sub{ margin:0 0 10px; color: var(--muted); font-size: 13px; }
+    .promo-row{ display:flex; gap:8px; align-items:center; margin: 6px 0 12px; }
+    .promo-code{
+      flex: 1 1 auto;
+      font: 700 13px/1 ui-monospace, Menlo, Consolas, monospace;
+      padding: 10px 12px; border-radius: 10px;
+      background:#f3f4f6; border:1px solid #e5e7eb; color:#111827;
+      overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+    }
+    .promo-close{
+      position:absolute; top:10px; right:10px;
+      width:28px; height:28px; border-radius:8px;
+      background:#fff; border:1px solid var(--border);
+      cursor:pointer; line-height:1; font-weight:800;
+    }
+    .promo-close:hover{ background:#f7f8fa; }
+    @keyframes promo-in{
+      from{ transform: translateY(10px); opacity: 0; }
+      to{ transform: translateY(0); opacity: 1; }
+    }
+    @media (max-width: 520px){
+      .promo-toast{ left: 10px; right: 10px; bottom: 14px; }
+    }
+    @media (prefers-reduced-motion: reduce){
+      .promo-toast{ animation: none; }
+    }
+  </style>
 </head>
 <body>
   <!-- Header -->
@@ -153,6 +192,18 @@
       </div>
     </div>
   </div>
+
+  <!-- Promo toast (hidden by default; shown by script after 3s) -->
+  <aside id="promoToast" class="card pad promo-toast" role="dialog" aria-live="polite" aria-label="First month free promotion" aria-modal="false">
+    <button class="promo-close" type="button" aria-label="Dismiss">×</button>
+    <h3 class="promo-title">🎁 First month free</h3>
+    <p class="promo-sub">Use this promotion code at checkout to get your first month on us.</p>
+    <div class="promo-row">
+      <div class="promo-code" id="promoCode">mrGUfWtu</div>
+      <button class="btn" id="copyPromo" type="button">Copy</button>
+    </div>
+    <a class="btn primary block" href="pricing.html?promo=mrGUfWtu">Go Pro — apply code</a>
+  </aside>
 
   <script>
     // Year
@@ -427,14 +478,42 @@
       }
       document.addEventListener('click', onDocClick, { capture: true });
     })();
+
+    // ---- Promo toast logic (shows ~3s after load, once per tab session) ----
+    (function promoToast(){
+      const PROMO_CODE = "mrGUfWtu";
+      const KEY = "promoDismissedV1";
+      const toast = document.getElementById('promoToast');
+      const closeBtn = toast.querySelector('.promo-close');
+      const copyBtn = document.getElementById('copyPromo');
+
+      function open(){ toast.classList.add('open'); }
+      function close(){ toast.classList.remove('open'); sessionStorage.setItem(KEY, "1"); }
+
+      // Auto-show after 3s unless dismissed for this tab session
+      window.addEventListener('load', () => {
+        if (sessionStorage.getItem(KEY)) return;
+        setTimeout(open, 3000);
+      });
+
+      closeBtn.addEventListener('click', close);
+
+      copyBtn.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(PROMO_CODE);
+          const old = copyBtn.textContent;
+          copyBtn.textContent = "Copied!";
+          setTimeout(() => (copyBtn.textContent = old), 900);
+        } catch {}
+      });
+    })();
   </script>
 
   <!-- put this near the end of <body> -->
-<script type="module">
-  import { inject } from "https://esm.sh/@vercel/analytics@1";
-  inject();
-</script>
+  <script type="module">
+    import { inject } from "https://esm.sh/@vercel/analytics@1";
+    inject();
+  </script>
 
 </body>
 </html>
-
